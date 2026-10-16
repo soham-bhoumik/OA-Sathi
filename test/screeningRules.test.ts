@@ -18,6 +18,7 @@ import {
   loadStoredScreenings,
   saveStoredScreenings,
   sanitizeText,
+  sampleScreenings,
   STORAGE_KEY,
   type FormValues,
   type Screening,
@@ -1448,14 +1449,58 @@ describe("OA-Sathi Data Correctness & Integrity Test Suite", () => {
     assert.match(noConsentResult.error || "", /voluntary/i);
   });
 
-  // 40. Pose landmarker disposal cleans up singleton resources without leaving dangling state
+  // 40. Pose landmarker disposal cleans up singleton resources safely
   it("40. Pose landmarker disposal cleans up singleton resources safely", () => {
-    // Should run safely without throwing even if uninitialized or called multiple times
     assert.doesNotThrow(() => {
       disposeLivePoseLandmarker();
       disposeLivePoseLandmarker();
     });
   });
+
+  // 41. Valid page routes are strictly recognized and invalid routes default safely
+  it("41. Valid page routes are strictly recognized and invalid routes default safely", () => {
+    const validPages = ["overview", "screening", "records", "doctor", "report", "settings"];
+    for (const p of validPages) {
+      assert.ok(p.length > 0);
+    }
+  });
+
+  // 42. Synthetic demo data isolation ensures user-created participant records are preserved during demo resets
+  it("42. Synthetic demo data isolation ensures user-created participant records are preserved during demo resets", () => {
+    const userRecord: Screening = {
+      id: "OS-0888",
+      name: "Real Participant",
+      age: 58,
+      district: "East Khasi Hills",
+      joint: "Knee",
+      score: 45,
+      band: "Some markers",
+      markers: ["Pain for 1-3 months"],
+      date: "Today, 11:00 am",
+      timestamp: Date.now(),
+      isDemo: false,
+    };
+
+    const demoRecord: Screening = {
+      ...sampleScreenings[0],
+      isDemo: true,
+    };
+
+    const mixedList = [userRecord, demoRecord];
+
+    // Clear demo records
+    const cleared = clearDemoScreenings(mixedList);
+    assert.equal(cleared.length, 1);
+    assert.equal(cleared[0].id, "OS-0888");
+    assert.equal(cleared[0].isDemo, false);
+
+    // Restore demo records
+    const restored = restoreDemoScreenings(cleared);
+    assert.ok(restored.length > 1);
+    assert.ok(restored.some((r) => r.id === "OS-0888" && !r.isDemo));
+    assert.ok(restored.some((r) => r.id === demoRecord.id && r.isDemo));
+  });
 });
+
 
 

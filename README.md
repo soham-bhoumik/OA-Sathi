@@ -42,23 +42,30 @@ In rural and hilly terrains across North East India, physical geography and limi
 - **Follow-Up & Scheduling Safeguards:** Prevents false appointment confirmations by requiring explicit appointment date, time, and clinic facility details before marking an appointment confirmed.
 - **Full In-Place Persistence:** Updates synchronize immediately across patient summaries, records tables, and printable reports without modifying the patient's original submitted answers.
 
-### Movement & Computer Vision Features
-- **Client-Side MediaPipe Pose Estimation:** 33-landmark pose tracking running entirely in the browser with real-time skeleton overlay.
-- **Exploratory Movement Features:** Computes step cadence, bilateral step symmetry, active knee flexion range of motion, and coronal trunk sway.
-- **Observational Fallback:** Manual visual observation inputs (visible limp, chair-rise hesitancy, turning hesitancy, joint crepitus) ensure field workers can assess mobility even if camera hardware is unavailable or lighting is poor.
-- **Quality Assurance & Safety:** Tracks visibility thresholds and usable frames; cleanly releases camera media tracks when leaving the screening page or when the application is backgrounded.
+### Movement & Computer Vision Features (Phase 9: Functional Pose Estimation & Movement Evaluation)
+- **Local In-Browser MediaPipe Pose Estimation:** 33-landmark pose tracking running client-side via Google MediaPipe PoseLandmarker (Lite float16 model) using WebAssembly (WASM) and WebGL/GPU execution with automatic CPU fallback.
+- **Local Asset Strategy with Fallback:** Fully offline-capable using local bundled assets (`public/models/pose_landmarker_lite.task` [5.77 MB] and `public/wasm/`), with automatic fallback to jsDelivr/Google Cloud CDN if local file access is restricted.
+- **Explicit Opt-In & Privacy-Preserving:** Camera access is strictly opt-in; no camera tracks are requested until the user explicitly opens the camera. No video is uploaded or transmitted to any external server.
+- **Controlled Movement Observation Workflow:**
+  1. *Pre-Capture Guidance:* Clear camera-positioning guidance (2–3 meters distance, waist/chest height, full body in view) and purpose explanation.
+  2. *Live Observation HUD with Early Stop:* 5-second countdown timer, live elapsed progress bar, tracked frame counter, and a prominent **"Stop Early & Review"** button enabling early completion.
+  3. *Pre-Save Review Panel:* Allows inspecting duration, usable frame ratio, tracking confidence, lower-extremity coordinate bounds, and derived exploratory measurements before choosing **"Attach Observation to Screening"** or **"Discard & Retest"**.
+- **Direct Technical Quality Indicators:** Measures actual usable frames, observation duration (seconds), person presence ratio, mean landmark confidence (0–100%), and lower-extremity landmark coordinate bounds (min, max, mean normalized X/Y ranges and tracking visibility for Left/Right Hips, Knees, and Ankles).
+- **Exploratory Derived Biomechanical Indicators:** Computes step cadence (steps/min), bilateral step symmetry index (0.0–1.0), active knee flexion range (degrees), and coronal trunk sway (degrees), each documented with required landmarks, formulas, units, assumptions, and validation limitations.
+- **Strict Clinical Non-Diagnostic Boundary:** Zero movement features are claimed as clinical biomarkers. The prototype does **NOT** diagnose osteoarthritis, estimate cartilage loss, predict joint space narrowing, or measure bone mineral density (BMD). Missing poses are never treated as normal movement.
+- **Observational Fallback:** The manual visual checklist (visible limp, chair-rise hesitancy, turning hesitancy, joint crepitus) remains 100% functional whether the camera is live, offline, or disabled. Camera use is completely optional and never blocks patient screening completion.
 
 ### Accessibility & Regional Personalization
 - **High Contrast Theme:** Dedicated toggle in Settings providing sharpened borders and deepened contrast for outdoor sunlight readability.
 - **Regional Phrasing Aid:** North Eastern terminology glossaries supporting Khasi, Garo, Meiteilon (Manipuri), Mizo, and Assamese clinical phrasing aids.
-- **Session Records & Data Management:** Full CSV export with formula injection protection and Phase 7 workflow audit columns (`Sharing Status`, `Consultation Status`, `Doctor Review Status`, `Doctor Follow-Up Recommendation`, `Urgent Safety Guidance`).
+- **Session Records & Data Management:** Full CSV export with formula injection protection and Phase 7/8/9 workflow audit columns (`Sharing Status`, `Consultation Status`, `Doctor Review Status`, `Doctor Follow-Up Recommendation`, `Urgent Safety Guidance`, `Gait Assessment Status`, `Gait Movement Summary`).
 
 ---
 
 ## 3. Installation & Run Commands
 
 ### Prerequisites
-- Node.js 18+ (tested with Node 20 / 22)
+- Node.js 18+ (tested with Node 20 / 22 / 24)
 - Python 3.10+ (for optional backend gait pipeline services)
 
 ### Frontend Web Application
@@ -69,7 +76,7 @@ npm install
 # Start local development server
 npm run dev
 
-# Run automated tests
+# Run automated tests (57 tests passing)
 npm test
 
 # Build production bundle
@@ -84,7 +91,7 @@ cd d:\PROJECTS\Hackathon
 # Install backend dependencies
 pip install -r backend/requirements.txt
 
-# Run backend unit tests
+# Run backend unit tests (9 tests)
 python -m unittest backend.test_gait_pipeline
 
 # Start FastAPI backend server
@@ -101,67 +108,72 @@ All automated test suites execute deterministically without external network cal
 > npm test
 
 ▶ OA-Sathi Movement Feature Evaluation & Quality Indicator Test Suite
-  ✔ 1. Valid landmark sequences produce valid exploratory features with correct units (3.6ms)
-  ✔ 2. Missing landmarks are preserved as null/unavailable, NOT coerced to zero (0.16ms)
-  ✔ 3. Invalid coordinates (NaN, Infinity, out-of-bounds) are strictly rejected (0.10ms)
-  ✔ 4. Low-visibility landmarks (< 0.35) are marked invalid with clear reason (0.12ms)
-  ✔ 5. Empty input (0 frames) is handled safely without throwing (0.14ms)
-  ✔ 6. Too few usable frames is flagged with informative technical quality status (0.21ms)
-  ✔ 7. Invalid or non-monotonic timestamps are caught and marked unusable (0.30ms)
-  ✔ 8. Incorrect or missing units are avoided across all movement features (0.96ms)
-  ✔ 9. Feature calculation is strictly deterministic for identical inputs (1.37ms)
-  ✔ 10. Frame with no person detected is rejected and counted appropriately (0.20ms)
-✔ OA-Sathi Movement Feature Evaluation & Quality Indicator Test Suite (8.2ms)
+  ✔ 1. Valid landmark sequences produce valid exploratory features with correct units (4.5ms)
+  ✔ 2. Missing landmarks are preserved as null/unavailable, NOT coerced to zero (0.2ms)
+  ✔ 3. Invalid coordinates (NaN, Infinity, out-of-bounds) are strictly rejected (0.1ms)
+  ✔ 4. Low-visibility landmarks (< 0.35) are marked invalid with clear reason (0.1ms)
+  ✔ 5. Empty input (0 frames) is handled safely without throwing (0.2ms)
+  ✔ 6. Too few usable frames is flagged with informative technical quality status (0.4ms)
+  ✔ 7. Invalid or non-monotonic timestamps are caught and marked unusable (0.8ms)
+  ✔ 8. Incorrect or missing units are avoided across all movement features (0.7ms)
+  ✔ 9. Feature calculation is strictly deterministic for identical inputs (1.5ms)
+  ✔ 10. Frame with no person detected is rejected and counted appropriately (0.2ms)
+  ✔ 11. Landmark coordinate summaries compute valid min, max, mean normalized bounds without inventing missing data (0.8ms)
+  ✔ 12. Early-stop sequence evaluation (e.g. 2.2s / 40 frames) computes valid quality indicators (0.5ms)
+  ✔ 13. Unilateral lower-limb occlusion disables bilateral symmetry while preserving active knee flexion (0.7ms)
+  ✔ 14. MovementFeature interface metadata contains required technical documentation attributes (1.3ms)
+  ✔ 15. Attaching movement assessment does not alter patient symptom answers, red flags, or wear score band (1.5ms)
+✔ OA-Sathi Movement Feature Evaluation & Quality Indicator Test Suite (15.6ms)
 
 ▶ OA-Sathi Data Correctness & Integrity Test Suite
-  ✔ 1. Distinguishes between Yes, No, Not checked, and Unanswered across all fields (1.49ms)
-  ✔ 2. Missing values are not counted as negative/protective answers (0.14ms)
-  ✔ 3. Produces identical deterministic score, band, and factors for identical inputs (0.55ms)
-  ✔ 4. Form validation rejects invalid numeric inputs and boundaries (0.29ms)
-  ✔ 5. BMI calculated strictly when valid height and weight measurements are provided (0.12ms)
-  ✔ 6. Generates stable sequential unique IDs without random collisions (0.30ms)
-  ✔ 7. Updating an existing record preserves ID and updates content in-place (0.17ms)
-  ✔ 8. Simulates JSON serialization and re-parsing with schema integrity (0.17ms)
-  ✔ 9. Backward-compatible reading of legacy records missing newer fields (0.91ms)
-  ✔ 10. Dashboard calculations accurately reflect record count, today count, and followup count (0.18ms)
-  ✔ 11. Properly escapes special characters (commas, quotes, newlines) in CSV output (0.15ms)
-  ✔ 12. Sanitizes formula injection characters (=, +, -, @, \t) in CSV exports (0.13ms)
-  ✔ 13. Distinguishes incomplete or omitted questions from normal outcomes (0.11ms)
-  ✔ 14. Identifies severe red-flag symptoms and supplies non-diagnostic urgent care guidance (0.20ms)
-  ✔ 15. Distinguishes synthetic demo data from real records and clears/restores safely (0.18ms)
-  ✔ 16. AI model boundary provides transparent non-connected status and zero external data leaks (0.16ms)
-  ✔ 17. Gait analysis service provides structured boundary without fabricating kinematics (0.12ms)
-  ✔ 18. Regional terminology glossary provides accurate local terms and defaults safely to English (0.09ms)
-  ✔ 19. Benchmark gait analysis returns structured schema with defensible exploratory movement metrics (27.1ms)
-  ✔ 20. Missing or unobservable movement features remain null and invalid rather than zero (0.16ms)
+  ✔ 1. Distinguishes between Yes, No, Not checked, and Unanswered across all fields (1.6ms)
+  ✔ 2. Missing values are not counted as negative/protective answers (0.1ms)
+  ✔ 3. Produces identical deterministic score, band, and factors for identical inputs (0.6ms)
+  ✔ 4. Form validation rejects invalid numeric inputs and boundaries (0.2ms)
+  ✔ 5. BMI calculated strictly when valid height and weight measurements are provided (0.1ms)
+  ✔ 6. Generates stable sequential unique IDs without random collisions (0.2ms)
+  ✔ 7. Updating an existing record preserves ID and updates content in-place (0.2ms)
+  ✔ 8. Simulates JSON serialization and re-parsing with schema integrity (0.1ms)
+  ✔ 9. Backward-compatible reading of legacy records missing newer fields (0.8ms)
+  ✔ 10. Dashboard calculations accurately reflect record count, today count, and followup count (0.1ms)
+  ✔ 11. Properly escapes special characters (commas, quotes, newlines) in CSV output (0.1ms)
+  ✔ 12. Sanitizes formula injection characters (=, +, -, @, \t) in CSV exports (0.1ms)
+  ✔ 13. Distinguishes incomplete or omitted questions from normal outcomes (0.1ms)
+  ✔ 14. Identifies severe red-flag symptoms and supplies non-diagnostic urgent care guidance (0.1ms)
+  ✔ 15. Distinguishes synthetic demo data from real records and clears/restores safely (0.1ms)
+  ✔ 16. AI model boundary provides transparent non-connected status and zero external data leaks (0.1ms)
+  ✔ 17. Gait analysis service provides structured boundary without fabricating kinematics (0.1ms)
+  ✔ 18. Regional terminology glossary provides accurate local terms and defaults safely to English (0.08ms)
+  ✔ 19. Benchmark gait analysis returns structured schema with defensible exploratory movement metrics (25.2ms)
+  ✔ 20. Missing or unobservable movement features remain null and invalid rather than zero (0.1ms)
   ✔ 21. Manual visual gait observations persist independently of automated tracking (0.09ms)
-  ✔ 22. Associates movement assessment with participant record and survives JSON persistence (1.94ms)
-  ✔ 23. CSV export includes Gait Assessment Status and Gait Movement Summary columns (1.20ms)
-  ✔ 24. getGaitAnalysisStatus returns appropriate status banners for all pipeline states (0.24ms)
-  ✔ 25. Settings storage loads schema-validated defaults and safely recovers from corrupt or invalid data (0.23ms)
-  ✔ 26. Settings storage persists valid updates without storing credentials and safely resets (0.17ms)
-  ✔ 27. Live pose estimation metrics calculator validates landmarks without false zeros (0.29ms)
-  ✔ 28. Safety red flags activate urgent care guidance while keeping wear score unaffected (0.17ms)
+  ✔ 22. Associates movement assessment with participant record and survives JSON persistence (1.9ms)
+  ✔ 23. CSV export includes Gait Assessment Status and Gait Movement Summary columns (1.2ms)
+  ✔ 24. getGaitAnalysisStatus returns appropriate status banners for all pipeline states (0.3ms)
+  ✔ 25. Settings storage loads schema-validated defaults and safely recovers from corrupt or invalid data (0.2ms)
+  ✔ 26. Settings storage persists valid updates without storing credentials and safely resets (0.1ms)
+  ✔ 27. Live pose estimation metrics calculator validates landmarks without false zeros (0.2ms)
+  ✔ 28. Safety red flags activate urgent care guidance while keeping wear score unaffected (0.1ms)
   ✔ 29. Measured BMD is preserved independently, never inferred, and missing BMD does not break workflow (0.09ms)
-  ✔ 30. Patient sharing consent transitions correctly and controls authorized doctor access (0.10ms)
-  ✔ 31. Consultation requests and doctor review persist without overwriting patient answers (0.21ms)
-  ✔ 32. CSV export includes Sharing, Consultation, Doctor Review, and Safety columns (0.16ms)
-  ✔ 33. Malformed, corrupted JSON or non-array records in storage recover safely without crashing (0.39ms)
-  ✔ 34. sanitizeText strips HTML tags and control characters to prevent XSS payloads (0.08ms)
+  ✔ 30. Patient sharing consent transitions correctly and controls authorized doctor access (0.1ms)
+  ✔ 31. Consultation requests and doctor review persist without overwriting patient answers (0.2ms)
+  ✔ 32. CSV export includes Sharing, Consultation, Doctor Review, and Safety columns (0.1ms)
+  ✔ 33. Malformed, corrupted JSON or non-array records in storage recover safely without crashing (0.3ms)
+  ✔ 34. sanitizeText strips HTML tags and control characters to prevent XSS payloads (0.07ms)
   ✔ 35. Consultation requests do not falsely confirm appointments without scheduling details (0.08ms)
   ✔ 36. Sharing consent withdrawal immediately revokes doctor review authorization (0.08ms)
-  ✔ 37. Urgent clinical red flags cannot be overridden or diluted by low routine wear score (0.11ms)
-  ✔ 38. Settings persistence is isolated from screening records and does not clear assessments (0.13ms)
-  ✔ 39. Input validation strictly validates required bounds and allows legitimate tri-state answers (0.12ms)
-  ✔ 40. Pose landmarker disposal cleans up singleton resources safely (0.12ms)
-✔ OA-Sathi Data Correctness & Integrity Test Suite (40.3ms)
+  ✔ 37. Urgent clinical red flags cannot be overridden or diluted by low routine wear score (0.1ms)
+  ✔ 38. Settings persistence is isolated from screening records and does not clear assessments (0.1ms)
+  ✔ 39. Input validation strictly validates required bounds and allows legitimate tri-state answers (0.1ms)
+  ✔ 40. Pose landmarker disposal cleans up singleton resources safely (0.1ms)
+✔ OA-Sathi Data Correctness & Integrity Test Suite (38.7ms)
 
-Total Tests: 50 passed, 0 failed, 0 skipped.
+Total Tests: 55 passed, 0 failed, 0 skipped across 2 test suites.
 ```
 
 ```
 > python -m unittest backend.test_gait_pipeline
-Ran 9 tests in 0.875s: OK
+Ran 9 tests in 0.886s: OK
 ```
 
 ---
@@ -176,12 +188,13 @@ To demonstrate the complete end-to-end integration:
 3. Complete symptom questions: pain duration (`1–3 months`), discomfort rating (`6/10`), stiffness (`under 30 min`), everyday limitation (`A little`).
 4. Under **Safety & Urgent Red-Flag Symptoms**, test entering `No` for fever and acute swelling, but report `Yes` for *Inability to bear weight after injury*.
 5. (Optional) In **Clinical Measurements**, enter height (`162 cm`), weight (`68 kg`), and optional measured BMD T-score (`-1.8`, `Femoral Neck / Hip`). Notice that BMI is calculated automatically (`25.9 kg/m²`), while BMD remains clearly labelled as measured from DXA.
-6. Check the voluntary screening consent box and click **Save screening & view summary**.
-7. Observe the **Urgent clinical advisory notice** highlighting the red flag, along with the transparent list of contributing and absent factors.
+6. (Optional) In **Movement Assessment**, click **Record 5s walking clip**. Review the camera positioning guidance, start the observation, observe real-time landmark tracking, and either let the timer complete or click **Stop Early & Review**. In the review screen, inspect duration, usable frames, coordinate bounds, and exploratory features before clicking **Attach Observation to Screening**.
+7. Check voluntary screening consent and click **Save screening & view summary**.
+8. Observe the **Urgent clinical advisory notice** highlighting the red flag, alongside the independent movement observations.
 
 ### Step 2: Medical Report & Browser Print
 1. Click **View & Print Medical Report (PDF)**.
-2. Review the structured clinical layout: demographics, symptoms, isolated laboratory BMD, safety questions, heuristic summary, and audit status.
+2. Review structured clinical layout: demographics, symptoms, isolated laboratory BMD, safety questions, heuristic summary, movement observations, and audit status.
 3. Observe the prominent badge: **`PRELIMINARY UNVALIDATED COMMUNITY SCREENING — NOT REVIEWED BY A DOCTOR`**.
 4. Click **Print / Save PDF**. Notice that the topbar, sidebar, and action buttons are cleanly hidden in the print stylesheet.
 
@@ -213,8 +226,6 @@ To demonstrate the complete end-to-end integration:
 
 ---
 
----
-
 ## 6. Demonstration Data & Demo Accounts
 
 - **Synthetic Records Pre-Loaded:** The prototype pre-populates three synthetic demonstration records:
@@ -235,7 +246,9 @@ To demonstrate the complete end-to-end integration:
 - **Not Encrypted Clinical Storage:** Standard browser `localStorage` is **NOT** encrypted clinical storage. It is suitable for controlled demonstration and local community health worker field triage simulations, but does not provide multi-tenant isolation, cryptographic field-level encryption, or cross-device synchronization.
 - **Multi-Device Boundary:** Because storage is local, records created on one browser/device do not automatically synchronize to another device or remote clinician workstation without an authenticated cloud backend.
 
-### Application Security Controls Implemented (Phase 8)
+### Application Security Controls Implemented (Phase 8 & 9)
+- **Zero Video Uploads:** Video frames are processed in-browser via WebAssembly; no raw video or frame data is uploaded to remote servers.
+- **Pre-Save Observation Review:** Users explicitly inspect derived observations before committing them to persistent records.
 - **Input Sanitization & XSS Prevention:** User-provided text inputs (names, consultation notes, doctor observations, appointment details) are sanitized via `sanitizeText()`, which strips HTML tags (`<script>`, `<iframe>`, `<img>`, event attributes) and non-printable control characters.
 - **Spreadsheet Formula Injection Defense:** CSV exports enforce prefix escaping—any cell value beginning with formula triggers (`=`, `+`, `-`, `@`, `\t`, `\r`) is safely quoted with a single-quote prefix.
 - **Button Debouncing & In-Flight Guards:** Actions such as submitting assessments, granting/withdrawing sharing consent, submitting consultation requests, and saving doctor reviews enforce in-flight locking and debounce guards to eliminate duplicate state mutations from rapid double-clicks.
@@ -272,20 +285,29 @@ A `.env.example` template is provided in the repository root. Real secrets or AP
 
 ---
 
-## 9. Features Remaining Experimental or Incomplete
+## 9. Movement Feature Documentation & Biomechanical Limitations
 
-1. **Client-Side MediaPipe Pose Tracking:** 2D monocular webcam tracking is an exploratory movement-feature demonstration (cadence, step symmetry, active flexion, coronal sway). It does **NOT** substitute for calibrated 3D multi-camera clinical gait laboratory analysis or radiographic cartilage assessment.
-2. **AI Inference Subsystem Stub:** The automated machine-learning inference pipeline (`aiModelService.ts`) is currently in `"not-connected"` status. The application transparently relies on deterministic, explainable clinical heuristic screening rules.
-3. **Local-Only Doctor Access Control:** The Doctor Demo Portal filters records locally based on patient consent state (`sharingStatus === "shared"`). Real-world multi-user clinical separation requires an enterprise server-side authentication system with role-based access control (RBAC).
+The table below summarizes all technical movement measurements implemented in OA-Sathi Phase 9:
+
+| Feature Name | Required Landmarks | Calculation Method | Units | Assumptions & Limitations | Clinically Validated? |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Usable Frame Count** | Torso (11/12, 23/24) + lower limb (25, 27 or 26, 28) | Count of frames where person visibility ≥ 0.35 and lower-extremity tracking is valid. | frames | Monocular visibility drops under poor illumination or loose clothing. | Technical indicator only |
+| **Observation Duration** | Strictly monotonic timestamps | `(lastTimestamp - firstTimestamp) / 1000` | seconds | Clock jitter or frame dropouts can distort temporal fidelity. | Technical indicator only |
+| **Landmark Bounds** | Hips (23, 24), Knees (25, 26), Ankles (27, 28) | Min, max, mean normalized X/Y coordinates across usable frames. | norm (0–1) | 2D coordinates without depth calibration; sensitive to distance from camera. | Technical indicator only |
+| **Step Cadence** | Bilateral ankles (27, 28) | Count alternating vertical ground-contact excursion peaks divided by duration in minutes. | steps/min | Assumes straight continuous walking. Foot plane occlusions cause false peaks. | **No** (Exploratory research estimate) |
+| **Bilateral Step Symmetry** | Hips (23, 24) and Ankles (27, 28) | `min(meanLeftExcursion, meanRightExcursion) / max(...)` where excursion = \|ankle.x - hip.x\|. | index (0–1) | Walking must be parallel to camera plane. Diagonal path skews symmetry. | **No** (Exploratory research estimate) |
+| **Active Knee Flexion Range** | Hip (23/24), Knee (25/26), Ankle (27/28) | 2D planar vector angle `acos((v1 · v2) / (|v1| \|v2\|))`; range = `max - min`. | degrees (°) | 2D projection under-represents true 3D angle during transverse rotation. | **No** (Exploratory research estimate) |
+| **Coronal Trunk Sway** | Shoulders (11, 12) and Hips (23, 24) | Standard deviation of lateral trunk tilt angle `atan2(dx, -dy)` across sequence. | degrees (°) | Camera must be level. Clothing shifts landmark centers. | **No** (Exploratory research estimate) |
 
 ---
 
 ## 10. Steps Required Prior to Real-World Clinical Pilot
 
 1. **Institutional Review Board (IRB) / Ethics Committee Approval:** Formal protocol review and written informed consent procedures compliant with the Indian Council of Medical Research (ICMR) ethical guidelines.
-2. **Clinical Validation Studies:** Prospective comparative validation against ACR clinical criteria and standing bilateral knee radiographs (Kellgren-Lawrence grading) across diverse primary care settings.
-3. **Secure Cloud Infrastructure:** Implementation of authenticated, role-based backend architecture with ABHA (Ayushman Bharat Health Account) federated identity integration and encryption at rest and in transit.
-4. **Device Compatibility & Bandwidth Audits:** Extended field validation across entry-level Android devices and low-connectivity primary health sub-centres.
+2. **Clinical Motion Lab Comparative Validation:** Validation of monocular 2D smartphone tracking against multi-camera Vicon/Qualisys motion capture systems and force plates.
+3. **Correlation with Kellgren-Lawrence Radiographic Grading:** Multi-centre prospective comparative studies against standing AP/lateral knee radiographs to establish whether exploratory kinematic indices correlate with functional knee OA impairment.
+4. **Secure Cloud Infrastructure:** Implementation of authenticated, role-based backend architecture with ABHA (Ayushman Bharat Health Account) federated identity integration and encryption at rest and in transit.
+5. **Device Compatibility & Low-Bandwidth Audits:** Extended field validation across entry-level Android devices in remote sub-centres.
 
 ---
 
@@ -294,4 +316,5 @@ A `.env.example` template is provided in the repository root. Real secrets or AP
 - Built as an open-source demonstration for rural community health innovation.
 - Incorporates Google MediaPipe for client-side pose tracking.
 - Icons by Lucide React.
+
 

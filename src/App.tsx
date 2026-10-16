@@ -42,10 +42,12 @@ import {
   Menu,
   MessageCircle,
   MoreHorizontal,
+  Play,
   Plus,
   Printer,
   RefreshCw,
   RotateCcw,
+  Square,
   Search,
   Send,
   Settings as SettingsIcon,
@@ -147,8 +149,27 @@ const MOBILITY_CHOICES = [
   [NOT_CHECKED, "Not checked"],
 ] as const;
 
+const VALID_PAGES = new Set<Page>([
+  "overview",
+  "screening",
+  "records",
+  "doctor",
+  "report",
+  "settings",
+]);
+
+function getInitialPageFromHash(): Page {
+  if (typeof window !== "undefined" && window.location.hash) {
+    const raw = window.location.hash.replace(/^#\/?/, "").toLowerCase() as Page;
+    if (VALID_PAGES.has(raw)) {
+      return raw;
+    }
+  }
+  return "overview";
+}
+
 function App() {
-  const [page, setPage] = useState<Page>("overview");
+  const [page, setPage] = useState<Page>(getInitialPageFromHash);
   const [appSettings, setAppSettings] = useState<AppSettings>(loadAppSettings);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [form, setForm] = useState<FormValues>(emptyForm);
@@ -338,11 +359,52 @@ function App() {
         stopCamera();
       }
       setPage(nextPage);
+      if (typeof window !== "undefined") {
+        const targetHash = `#${nextPage}`;
+        if (window.location.hash !== targetHash) {
+          window.history.pushState(null, "", targetHash);
+        }
+      }
       setMobileNavOpen(false);
       setNotice("");
     },
     [page, stopCamera]
   );
+
+  // Browser back/forward navigation (popstate & hashchange) handling
+  useEffect(() => {
+    const handlePopState = () => {
+      if (typeof window === "undefined") return;
+      const candidate = window.location.hash.replace(/^#\/?/, "").toLowerCase() as Page;
+      if (VALID_PAGES.has(candidate)) {
+        setPage((curr) => {
+          if (curr === "screening" && candidate !== "screening") {
+            stopCamera();
+          }
+          return candidate;
+        });
+        setMobileNavOpen(false);
+      }
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    window.addEventListener("hashchange", handlePopState);
+    return () => {
+      window.removeEventListener("popstate", handlePopState);
+      window.removeEventListener("hashchange", handlePopState);
+    };
+  }, [stopCamera]);
+
+  // Resilient Report View: If refreshing on #report without an active record in memory, load the first available record or fallback to records
+  useEffect(() => {
+    if (page === "report" && !activeReportRecord) {
+      if (screenings.length > 0) {
+        setActiveReportRecord(screenings[0]);
+      } else {
+        navigate("records");
+      }
+    }
+  }, [page, activeReportRecord, screenings, navigate]);
 
   const handleUpdateSetting = useCallback(
     <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
@@ -514,9 +576,8 @@ function App() {
     setConsent(false);
     setError("");
     setNotice("");
-    setPage("screening");
-    setMobileNavOpen(false);
-  }, [appSettings.defaultDistrict, stopCamera]);
+    navigate("screening");
+  }, [appSettings.defaultDistrict, navigate, stopCamera]);
 
   const handleOpenScreeningTab = useCallback(() => {
     stopCamera();
@@ -533,10 +594,8 @@ function App() {
       setManualObservations({ ...DEFAULT_MANUAL_OBSERVATIONS });
       setConsent(false);
     }
-    setPage("screening");
-    setMobileNavOpen(false);
-    setNotice("");
-  }, [appSettings.defaultDistrict, result, stopCamera]);
+    navigate("screening");
+  }, [appSettings.defaultDistrict, navigate, result, stopCamera]);
 
   const handleEditScreening = useCallback(
     (recordToEdit: Screening) => {
@@ -572,10 +631,10 @@ function App() {
       setConsent(true);
       setResult(null);
       setError("");
-      setPage("screening");
+      navigate("screening");
       setNotice(`Editing record ${recordToEdit.id}. Modify answers and click update.`);
     },
-    [stopCamera]
+    [navigate, stopCamera]
   );
 
   const handleSubmit = useCallback(
@@ -696,9 +755,9 @@ function App() {
 
   const handleOpenMedicalReport = useCallback((record: Screening) => {
     setActiveReportRecord(record);
-    setPage("report");
+    navigate("report");
     window.scrollTo({ top: 0, behavior: "smooth" });
-  }, []);
+  }, [navigate]);
 
   const handleShareConsent = useCallback((record: Screening) => {
     const updated = shareScreeningWithConsent(record);
@@ -796,8 +855,8 @@ function App() {
 
   const handleOpenScreening = useCallback((item: Screening) => {
     setResult(item);
-    setPage("screening");
-  }, []);
+    navigate("screening");
+  }, [navigate]);
 
   const handleGoToRecords = useCallback(() => {
     navigate("records");
@@ -1017,6 +1076,7 @@ function App() {
             onRunBenchmark={handleRunBenchmarkClip}
             onClearGait={handleClearGaitAssessment}
             onLiveClipRecorded={handleLiveClipRecorded}
+            onCommitObservation={setGaitAssessment}
           />
         )}
         {page === "records" && (
@@ -1043,9 +1103,9 @@ function App() {
             record={activeReportRecord}
             onBack={() => {
               if (result && activeReportRecord.id === result.id) {
-                setPage("screening");
+                navigate("screening");
               } else {
-                setPage("records");
+                navigate("records");
               }
             }}
             onEdit={
@@ -1498,6 +1558,7 @@ const ScreeningPage = memo(function ScreeningPage({
   onRunBenchmark,
   onClearGait,
   onLiveClipRecorded,
+  onCommitObservation,
 }: {
   form: FormValues;
   result: Screening | null;
@@ -1532,6 +1593,7 @@ const ScreeningPage = memo(function ScreeningPage({
   onRunBenchmark: () => void;
   onClearGait: () => void;
   onLiveClipRecorded?: (frames: ValidatedPoseFrame[]) => void;
+  onCommitObservation?: (observation: StructuredGaitAnalysisOutput) => void;
 }) {
   const [regionalLang, setRegionalLang] = useState<NERLanguageCode>(preferredLanguage || "en");
   useEffect(() => {
@@ -2048,6 +2110,8 @@ const ScreeningPage = memo(function ScreeningPage({
               onRunBenchmark={onRunBenchmark}
               onClearGait={onClearGait}
               onLiveClipRecorded={onLiveClipRecorded}
+              onCommitObservation={onCommitObservation}
+              participantName={form.name}
             />
 
             <div className="review-panel">
@@ -2156,12 +2220,14 @@ const MovementCard = memo(function MovementCard({
   manualObservations,
   onManualObservationChange,
   isRecordingClip,
-  recordingCountDown,
+  recordingCountDown: _recordingCountDown,
   isAnalyzingGait,
-  onStartRecording,
+  onStartRecording: _onStartRecording,
   onRunBenchmark,
   onClearGait,
   onLiveClipRecorded,
+  onCommitObservation,
+  participantName,
 }: {
   cameraStatus: "idle" | "ready" | "unsupported" | "denied" | "error";
   cameraMessage: string;
@@ -2179,6 +2245,8 @@ const MovementCard = memo(function MovementCard({
   onRunBenchmark: () => void;
   onClearGait: () => void;
   onLiveClipRecorded?: (frames: ValidatedPoseFrame[]) => void;
+  onCommitObservation?: (observation: StructuredGaitAnalysisOutput) => void;
+  participantName?: string;
 }) {
   const gaitStatus = getGaitAnalysisStatus(cameraStatus === "ready", gaitAssessment);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -2193,16 +2261,123 @@ const MovementCard = memo(function MovementCard({
   const [poseError, setPoseError] = useState<string>("");
   const [retryTrigger, setRetryTrigger] = useState<number>(0);
 
+  // Controlled Observation Workflow State
+  const [observationStage, setObservationStage] = useState<"idle" | "guidance" | "capturing" | "review">("idle");
+  const [stagedObservation, setStagedObservation] = useState<StructuredGaitAnalysisOutput | null>(null);
+  const [localCountdown, setLocalCountdown] = useState<number>(5);
+  const [elapsedCaptureMs, setElapsedCaptureMs] = useState<number>(0);
+  const captureTimerRef = useRef<number | null>(null);
+  const captureStartTimeRef = useRef<number>(0);
+
   const recordingActiveRef = useRef<boolean>(false);
   const recordedFramesRef = useRef<ValidatedPoseFrame[]>([]);
   const frameCounterRef = useRef<number>(0);
+
+  const handleStopAndReview = useCallback(() => {
+    if (captureTimerRef.current !== null) {
+      clearInterval(captureTimerRef.current);
+      captureTimerRef.current = null;
+    }
+    recordingActiveRef.current = false;
+
+    const frames = [...recordedFramesRef.current];
+    if (onLiveClipRecorded) {
+      onLiveClipRecorded(frames);
+    }
+
+    const evalResult = evaluateMovementSequence(frames, {
+      sequenceId: `live_${Date.now()}`,
+      timestamp: Date.now(),
+    });
+    const output = convertMovementEvaluationToGaitOutput(
+      evalResult,
+      participantName || "PARTICIPANT",
+      manualObservations
+    );
+    setStagedObservation(output);
+    setObservationStage("review");
+  }, [manualObservations, onLiveClipRecorded, participantName]);
+
+  const handleBeginObservationCapture = useCallback(() => {
+    recordedFramesRef.current = [];
+    frameCounterRef.current = 0;
+    recordingActiveRef.current = true;
+    setObservationStage("capturing");
+    setLocalCountdown(5);
+    setElapsedCaptureMs(0);
+    captureStartTimeRef.current = Date.now();
+
+    if (captureTimerRef.current !== null) {
+      clearInterval(captureTimerRef.current);
+    }
+
+    captureTimerRef.current = window.setInterval(() => {
+      const elapsedSec = (Date.now() - captureStartTimeRef.current) / 1000;
+      setElapsedCaptureMs(Math.round(elapsedSec * 1000));
+      const remaining = Math.max(0, 5 - Math.floor(elapsedSec));
+      setLocalCountdown(remaining);
+
+      if (elapsedSec >= 5) {
+        if (captureTimerRef.current !== null) {
+          clearInterval(captureTimerRef.current);
+          captureTimerRef.current = null;
+        }
+        handleStopAndReview();
+      }
+    }, 100);
+  }, [handleStopAndReview]);
+
+  const handleStartObservationWorkflow = useCallback(() => {
+    if (cameraStatus !== "ready") {
+      onStartCamera();
+    }
+    setObservationStage((curr) => (curr === "guidance" ? "idle" : "guidance"));
+  }, [cameraStatus, onStartCamera]);
+
+  const handleAcceptObservation = useCallback(() => {
+    if (stagedObservation) {
+      if (onCommitObservation) {
+        onCommitObservation(stagedObservation);
+      }
+      setStagedObservation(null);
+      setObservationStage("idle");
+    }
+  }, [stagedObservation, onCommitObservation]);
+
+  const handleDiscardObservation = useCallback(() => {
+    setStagedObservation(null);
+    setObservationStage("idle");
+    recordedFramesRef.current = [];
+  }, []);
+
+  useEffect(() => {
+    if (cameraStatus !== "ready") {
+      if (captureTimerRef.current !== null) {
+        clearInterval(captureTimerRef.current);
+        captureTimerRef.current = null;
+      }
+      recordingActiveRef.current = false;
+      if (observationStage === "capturing" || observationStage === "guidance") {
+        setObservationStage("idle");
+      }
+    }
+  }, [cameraStatus, observationStage]);
+
+  useEffect(() => {
+    return () => {
+      if (captureTimerRef.current !== null) {
+        clearInterval(captureTimerRef.current);
+        captureTimerRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (isRecordingClip) {
       recordingActiveRef.current = true;
       recordedFramesRef.current = [];
       frameCounterRef.current = 0;
-    } else {
+    } else if (observationStage !== "capturing") {
       if (recordingActiveRef.current) {
         recordingActiveRef.current = false;
         if (onLiveClipRecorded && recordedFramesRef.current.length > 0) {
@@ -2210,7 +2385,7 @@ const MovementCard = memo(function MovementCard({
         }
       }
     }
-  }, [isRecordingClip, onLiveClipRecorded]);
+  }, [isRecordingClip, observationStage, onLiveClipRecorded]);
 
   useEffect(() => {
     setShowOverlay(enablePoseOverlay);
@@ -2381,13 +2556,13 @@ const MovementCard = memo(function MovementCard({
           <button
             type="button"
             className="button button-secondary"
-            onClick={onStartRecording}
-            disabled={isRecordingClip || isAnalyzingGait}
-            title="Record a 5-second walking or chair-rise sequence for local pose estimation"
+            onClick={handleStartObservationWorkflow}
+            disabled={observationStage === "capturing" || isAnalyzingGait}
+            title="Start controlled 5-second movement observation with camera positioning guidance"
           >
-            {isRecordingClip ? (
+            {observationStage === "capturing" ? (
               <>
-                <span className="recording-live-pulse" /> Recording clip ({recordingCountDown}s)
+                <span className="recording-live-pulse" /> Capturing ({localCountdown}s)
               </>
             ) : (
               "Record 5s walking clip"
@@ -2399,7 +2574,7 @@ const MovementCard = memo(function MovementCard({
           type="button"
           className="button button-secondary"
           onClick={onRunBenchmark}
-          disabled={isAnalyzingGait || isRecordingClip}
+          disabled={isAnalyzingGait || isRecordingClip || observationStage === "capturing"}
           title="Run gait analysis using a validated benchmark walking cycle (tests pipeline without camera hardware)"
         >
           {isAnalyzingGait ? "Analyzing..." : "Test benchmark clip"}
@@ -2428,12 +2603,65 @@ const MovementCard = memo(function MovementCard({
           </button>
         )}
 
-        {cameraStatus === "ready" && !isRecordingClip && (
+        {cameraStatus === "ready" && !isRecordingClip && observationStage !== "capturing" && (
           <span className="camera-live-indicator">Camera live</span>
         )}
       </div>
 
-      <div className={`camera-panel ${cameraStatus === "ready" ? "camera-visible" : ""}`}>
+      {/* PHASE 9: Controlled Observation Guidance Card */}
+      {observationStage === "guidance" && (
+        <div className="observation-guidance-card">
+          <div className="guidance-header">
+            <Info size={18} />
+            <div>
+              <h4>Optional Movement Observation Setup</h4>
+              <p>Direct in-browser pose tracking to evaluate exploratory movement rhythm and joint excursion.</p>
+            </div>
+          </div>
+          <div className="guidance-body">
+            <div className="guidance-step">
+              <span className="step-num">1</span>
+              <div>
+                <strong>Device placement:</strong> Place camera at waist or chest height on a stable, level surface.
+              </div>
+            </div>
+            <div className="guidance-step">
+              <span className="step-num">2</span>
+              <div>
+                <strong>Position yourself:</strong> Stand 2–3 meters back so your whole body (head to feet) is in view.
+              </div>
+            </div>
+            <div className="guidance-step">
+              <span className="step-num">3</span>
+              <div>
+                <strong>Movement test:</strong> Walk continuously across the camera frame, or perform 2–3 slow chair sit-to-stands.
+              </div>
+            </div>
+          </div>
+          <div className="guidance-privacy-note">
+            <Lock size={13} />
+            <span>Privacy Guarantee: Video frames are evaluated locally in your browser using WebAssembly. No video is uploaded or stored.</span>
+          </div>
+          <div className="guidance-actions">
+            <button
+              type="button"
+              className="button button-primary"
+              onClick={handleBeginObservationCapture}
+            >
+              <Play size={13} /> Begin 5-Second Observation
+            </button>
+            <button
+              type="button"
+              className="button button-secondary"
+              onClick={() => setObservationStage("idle")}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className={`camera-panel ${cameraStatus === "ready" ? "camera-visible" : ""}`} style={{ position: "relative" }}>
         <video
           ref={videoRef}
           className="camera-video"
@@ -2447,6 +2675,35 @@ const MovementCard = memo(function MovementCard({
           className="pose-canvas-overlay"
           style={{ display: cameraStatus === "ready" ? "block" : "none" }}
         />
+
+        {/* Live Observation Capture HUD with Early Stop */}
+        {observationStage === "capturing" && (
+          <div className="observation-capture-hud">
+            <div className="capture-hud-status">
+              <span style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                <span className="recording-live-pulse" />
+                <strong>Recording movement... {localCountdown}s</strong>
+              </span>
+              <span className="capture-frames-badge">{recordedFramesRef.current.length} frames</span>
+            </div>
+            <div className="capture-hud-progress">
+              <div
+                className="capture-hud-bar"
+                style={{ width: `${Math.min(100, Math.max(0, (elapsedCaptureMs / 5000) * 100))}%` }}
+              />
+            </div>
+            <div className="capture-hud-controls">
+              <button
+                type="button"
+                className="button button-secondary"
+                style={{ background: "#ffffff", borderColor: "#e11d48", color: "#e11d48", padding: "4px 10px", fontSize: "11px" }}
+                onClick={handleStopAndReview}
+              >
+                <Square size={12} /> Stop Early & Review
+              </button>
+            </div>
+          </div>
+        )}
 
         {cameraStatus === "ready" && (
           <>
@@ -2511,6 +2768,192 @@ const MovementCard = memo(function MovementCard({
           <span>Camera feed appears here when available.</span>
         </div>
       </div>
+
+      {/* PHASE 9: Pre-Save Observation Review Box */}
+      {observationStage === "review" && stagedObservation && (
+        <div className="observation-review-box">
+          <div className="review-box-header">
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <Activity size={18} style={{ color: "#0d9488" }} />
+              <div>
+                <h4>Pre-Save Movement Observation Review</h4>
+                <span style={{ fontSize: "11px", color: "#64748b" }}>
+                  Review derived technical indicators before choosing to attach them to the patient screening.
+                </span>
+              </div>
+            </div>
+            <span
+              className={`gait-status-tag ${
+                stagedObservation.status === "completed"
+                  ? "status-completed"
+                  : stagedObservation.status === "insufficient-quality"
+                    ? "status-insufficient"
+                    : "status-failed"
+              }`}
+            >
+              {stagedObservation.inputQualityStatus.toUpperCase()} QUALITY
+            </span>
+          </div>
+
+          <div className="quality-indicators-grid">
+            <div className="quality-indicator-card">
+              <span className="q-label">Observed Duration</span>
+              <span className="q-value">{stagedObservation.durationSeconds.toFixed(1)}</span>
+              <span className="q-sub">seconds</span>
+            </div>
+            <div className="quality-indicator-card">
+              <span className="q-label">Usable Frames</span>
+              <span className="q-value">{stagedObservation.usableFramesCount}</span>
+              <span className="q-sub">
+                ({stagedObservation.technicalQuality?.usableFramePercentage ?? 0}%)
+              </span>
+            </div>
+            <div className="quality-indicator-card">
+              <span className="q-label">Tracking Confidence</span>
+              <span className="q-value">{Math.round(stagedObservation.meanLandmarkConfidence * 100)}%</span>
+              <span className="q-sub">confidence</span>
+            </div>
+            <div className="quality-indicator-card">
+              <span className="q-label">Kinematic Status</span>
+              <span className="q-value" style={{ fontSize: "12px", textTransform: "capitalize" }}>
+                {stagedObservation.technicalQuality?.suitabilityStatus ?? "Marginal"}
+              </span>
+            </div>
+          </div>
+
+          {stagedObservation.technicalQuality?.coordinateSummary && (
+            <div style={{ marginTop: "12px" }}>
+              <strong style={{ fontSize: "11px", color: "#334155", display: "block", marginBottom: "4px" }}>
+                Lower-Extremity Landmark Coordinate Bounds (Normalized 2D)
+              </strong>
+              <div className="coordinate-summary-grid">
+                {Object.entries(stagedObservation.technicalQuality.coordinateSummary).map(([jointKey, range]) => (
+                  <div key={jointKey} className="coordinate-joint-card">
+                    <span className="coordinate-joint-name">
+                      {jointKey.replace(/([A-Z])/g, " $1")}
+                    </span>
+                    <div className="coordinate-joint-stats">
+                      {range.minX !== null ? (
+                        <>
+                          <span>X: [{range.minX.toFixed(2)}, {range.maxX?.toFixed(2)}]</span>
+                          <span>Y: [{range.minY?.toFixed(2)}, {range.maxY?.toFixed(2)}]</span>
+                          <span>Vis: {Math.round((range.meanVisibility ?? 0) * 100)}% ({range.trackedFramesCount} frames)</span>
+                        </>
+                      ) : (
+                        <span style={{ color: "#94a3b8", fontStyle: "italic" }}>Not detected</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ marginTop: "12px" }}>
+            <strong style={{ fontSize: "11px", color: "#334155", display: "block", marginBottom: "4px" }}>
+              Exploratory Movement Measurements
+            </strong>
+            <div className="gait-features-grid">
+              <div className="gait-feature-tile">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span className="feature-label">Step Cadence</span>
+                  <span className={`feature-valid-tag ${stagedObservation.features.cadence?.isValid ? "tag-valid" : "tag-invalid"}`}>
+                    {stagedObservation.features.cadence?.isValid ? "Valid" : "Unavailable"}
+                  </span>
+                </div>
+                <div>
+                  <span className="feature-val">
+                    {stagedObservation.features.cadence?.value !== null && stagedObservation.features.cadence?.isValid
+                      ? stagedObservation.features.cadence.value
+                      : "Unavailable"}
+                  </span>
+                  <span className="feature-unit">
+                    {stagedObservation.features.cadence?.isValid ? stagedObservation.features.cadence.unit : ""}
+                  </span>
+                </div>
+              </div>
+
+              <div className="gait-feature-tile">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span className="feature-label">Bilateral Step Symmetry</span>
+                  <span className={`feature-valid-tag ${stagedObservation.features.stepSymmetry?.isValid ? "tag-valid" : "tag-invalid"}`}>
+                    {stagedObservation.features.stepSymmetry?.isValid ? "Valid" : "Unavailable"}
+                  </span>
+                </div>
+                <div>
+                  <span className="feature-val">
+                    {stagedObservation.features.stepSymmetry?.value !== null && stagedObservation.features.stepSymmetry?.isValid
+                      ? stagedObservation.features.stepSymmetry.value
+                      : "Unavailable"}
+                  </span>
+                  <span className="feature-unit">
+                    {stagedObservation.features.stepSymmetry?.isValid ? stagedObservation.features.stepSymmetry.unit : ""}
+                  </span>
+                </div>
+              </div>
+
+              <div className="gait-feature-tile">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span className="feature-label">Active Knee Flexion Range</span>
+                  <span className={`feature-valid-tag ${stagedObservation.features.activeKneeFlexionRange?.isValid ? "tag-valid" : "tag-invalid"}`}>
+                    {stagedObservation.features.activeKneeFlexionRange?.isValid ? "Valid" : "Unavailable"}
+                  </span>
+                </div>
+                <div>
+                  <span className="feature-val">
+                    {stagedObservation.features.activeKneeFlexionRange?.value !== null && stagedObservation.features.activeKneeFlexionRange?.isValid
+                      ? `${stagedObservation.features.activeKneeFlexionRange.value}°`
+                      : "Unavailable"}
+                  </span>
+                </div>
+              </div>
+
+              <div className="gait-feature-tile">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span className="feature-label">Coronal Trunk Sway</span>
+                  <span className={`feature-valid-tag ${stagedObservation.features.coronalTrunkSway?.isValid ? "tag-valid" : "tag-invalid"}`}>
+                    {stagedObservation.features.coronalTrunkSway?.isValid ? "Valid" : "Unavailable"}
+                  </span>
+                </div>
+                <div>
+                  <span className="feature-val">
+                    {stagedObservation.features.coronalTrunkSway?.value !== null && stagedObservation.features.coronalTrunkSway?.isValid
+                      ? `${stagedObservation.features.coronalTrunkSway.value}°`
+                      : "Unavailable"}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {stagedObservation.warnings && stagedObservation.warnings.length > 0 && (
+            <div style={{ margin: "10px 0 0", padding: "8px 10px", background: "#fef2f2", border: "1px solid #fee2e2", borderRadius: "6px", fontSize: "11px", color: "#991b1b" }}>
+              <strong>Observation Quality Notice:</strong> {stagedObservation.warnings.join(" ")}
+            </div>
+          )}
+
+          <div className="gait-disclaimer-note" style={{ margin: "10px 0 0" }}>
+            <strong>Non-Diagnostic Disclosure:</strong> Direct technical observations only. This prototype does not generate an osteoarthritis diagnosis, bone density, or cartilage thickness estimation. Camera capture does not override patient-reported safety red flags.
+          </div>
+
+          <div className="review-box-actions">
+            <button
+              type="button"
+              className="button button-primary"
+              onClick={handleAcceptObservation}
+            >
+              <CheckCircle2 size={14} /> Attach Observation to Screening
+            </button>
+            <button
+              type="button"
+              className="button button-secondary"
+              onClick={handleDiscardObservation}
+            >
+              <Trash2 size={14} /> Discard & Retest
+            </button>
+          </div>
+        </div>
+      )}
 
       {livePoseStatus === "error" && (
         <div
@@ -2620,6 +3063,35 @@ const MovementCard = memo(function MovementCard({
                 </span>
               </div>
             </div>
+
+            {gaitAssessment.technicalQuality?.coordinateSummary && (
+              <div style={{ marginTop: "8px", marginBottom: "8px" }}>
+                <span style={{ fontSize: "7.5px", fontWeight: 700, color: "#3b5a51", textTransform: "uppercase", display: "block", marginBottom: "4px" }}>
+                  Lower-Extremity Landmark Coordinate Bounds (Normalized 2D)
+                </span>
+                <div className="coordinate-summary-grid">
+                  {Object.entries(gaitAssessment.technicalQuality.coordinateSummary).map(([jointKey, range]) => (
+                    <div key={jointKey} className="coordinate-joint-card">
+                      <span className="coordinate-joint-name">
+                        {jointKey.replace(/([A-Z])/g, " $1")}
+                      </span>
+                      <div className="coordinate-joint-stats">
+                        {range.minX !== null ? (
+                          <>
+                            <span>X: [{range.minX.toFixed(2)}, {range.maxX?.toFixed(2)}]</span>
+                            <span>Y: [{range.minY?.toFixed(2)}, {range.maxY?.toFixed(2)}]</span>
+                            <span>Vis: {Math.round((range.meanVisibility ?? 0) * 100)}% ({range.trackedFramesCount} frames)</span>
+                          </>
+                        ) : (
+                          <span style={{ color: "#94a3b8", fontStyle: "italic" }}>Not detected</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div style={{ fontSize: "7.5px", color: "#547067", marginBottom: "8px", fontStyle: "italic" }}>
               Method: 2D landmark coordinates and model confidence evaluated over capture duration. Technical indicators evaluate camera capture fidelity only and do NOT represent OA risk markers.
             </div>
@@ -2751,8 +3223,8 @@ const MovementCard = memo(function MovementCard({
                     type="button"
                     className="button button-secondary"
                     style={{ fontSize: "7.5px", padding: "4px 8px" }}
-                    onClick={onStartRecording}
-                    disabled={isRecordingClip || isAnalyzingGait}
+                    onClick={handleStartObservationWorkflow}
+                    disabled={observationStage === "capturing" || isAnalyzingGait}
                   >
                     <RefreshCw size={11} /> Retry clip recording
                   </button>

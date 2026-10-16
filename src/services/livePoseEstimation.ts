@@ -72,6 +72,7 @@ export const SKELETON_CONNECTIONS: [number, number][] = [
 
 let landmarkerInstance: PoseLandmarker | null = null;
 let initializationPromise: Promise<PoseLandmarker> | null = null;
+let lastVideoTimestamp = -1;
 
 const LOCAL_WASM_PATH = "/wasm";
 const CDN_WASM_PATH = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm";
@@ -81,8 +82,19 @@ const CDN_MODEL_PATH =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
 
 /**
+ * Resets the video timestamp tracker so new video streams start fresh.
+ */
+export function resetPoseTimestamp(): void {
+  lastVideoTimestamp = -1;
+}
+
+/**
  * Initializes and caches the PoseLandmarker singleton.
- * Attempts local assets first, with fallback to CDN if local files are blocked or absent.
+ * Fallback sequence:
+ * 1. Local WASM + Local Model (GPU delegate)
+ * 2. Local WASM + Local Model (CPU delegate)
+ * 3. CDN WASM + CDN Model (CPU delegate)
+ * Cleans up promise on failure so retries execute cleanly.
  */
 export async function getLivePoseLandmarker(): Promise<PoseLandmarker> {
   if (landmarkerInstance) {
@@ -100,6 +112,7 @@ export async function getLivePoseLandmarker(): Promise<PoseLandmarker> {
       vision = await FilesetResolver.forVisionTasks(CDN_WASM_PATH);
     }
 
+    // Attempt 1: Local Model + GPU
     try {
       landmarkerInstance = await PoseLandmarker.createFromOptions(vision, {
         baseOptions: {
@@ -113,8 +126,30 @@ export async function getLivePoseLandmarker(): Promise<PoseLandmarker> {
         minTrackingConfidence: 0.45,
       });
       return landmarkerInstance;
-    } catch {
-      // Fallback with CPU delegate or CDN model asset
+    } catch (gpuErr) {
+      console.warn("MediaPipe GPU initialization failed, attempting local CPU delegate:", gpuErr);
+    }
+
+    // Attempt 2: Local Model + CPU
+    try {
+      landmarkerInstance = await PoseLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: LOCAL_MODEL_PATH,
+          delegate: "CPU",
+        },
+        runningMode: "VIDEO",
+        numPoses: 1,
+        minPoseDetectionConfidence: 0.45,
+        minPosePresenceConfidence: 0.45,
+        minTrackingConfidence: 0.45,
+      });
+      return landmarkerInstance;
+    } catch (localCpuErr) {
+      console.warn("MediaPipe local model failed, attempting CDN fallback:", localCpuErr);
+    }
+
+    // Attempt 3: CDN Model + CPU
+    try {
       landmarkerInstance = await PoseLandmarker.createFromOptions(vision, {
         baseOptions: {
           modelAssetPath: CDN_MODEL_PATH,
@@ -127,8 +162,14 @@ export async function getLivePoseLandmarker(): Promise<PoseLandmarker> {
         minTrackingConfidence: 0.45,
       });
       return landmarkerInstance;
+    } catch (cdnErr) {
+      initializationPromise = null;
+      throw cdnErr;
     }
-  })();
+  })().catch((err) => {
+    initializationPromise = null;
+    throw err;
+  });
 
   return initializationPromise;
 }
@@ -161,9 +202,13 @@ export function detectAndDrawPose(
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+  // Ensure strictly increasing timestamp for MediaPipe VIDEO mode
+  const safeTimestampMs = Math.max(timestampMs, lastVideoTimestamp + 1);
+  lastVideoTimestamp = safeTimestampMs;
+
   let result: PoseLandmarkerResult | null = null;
   try {
-    result = landmarker.detectForVideo(video, timestampMs);
+    result = landmarker.detectForVideo(video, safeTimestampMs);
   } catch {
     // Drop frame on timing or WebGL busy error
     return {
@@ -310,6 +355,7 @@ export function calculateLiveMetrics(landmarks: NormalizedLandmark[]): LiveJoint
  * Releases cached PoseLandmarker resources.
  */
 export function disposeLivePoseLandmarker(): void {
+  lastVideoTimestamp = -1;
   if (landmarkerInstance) {
     try {
       landmarkerInstance.close();
@@ -317,6 +363,6 @@ export function disposeLivePoseLandmarker(): void {
       // non-blocking
     }
     landmarkerInstance = null;
-    initializationPromise = null;
   }
+  initializationPromise = null;
 }

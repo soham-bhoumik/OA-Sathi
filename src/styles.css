@@ -1777,6 +1777,214 @@ tbody tr:hover { background: #f9fcfa; }
 }
 
 /* ============================================================
+   PHASE 9: CONTROLLED MOVEMENT CAPTURE & REVIEW WORKFLOW
+   ============================================================ */
+.observation-guidance-card {
+  margin: 12px 0;
+  padding: 14px 16px;
+  background: #f0fdf9;
+  border: 1.5px solid #a7f3d0;
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgba(13, 148, 136, 0.08);
+}
+
+.guidance-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 12px;
+  color: #0f766e;
+}
+
+.guidance-header h4 {
+  margin: 0 0 2px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #134e4a;
+}
+
+.guidance-header p {
+  margin: 0;
+  font-size: 11px;
+  color: #115e59;
+}
+
+.guidance-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.guidance-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 11.5px;
+  color: #1f3830;
+  line-height: 1.4;
+}
+
+.guidance-step .step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  border-radius: 50%;
+  background: #0d9488;
+  color: #ffffff;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.guidance-privacy-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #ffffff;
+  border: 1px solid #c7ece0;
+  border-radius: 6px;
+  font-size: 10.5px;
+  color: #0f766e;
+  margin-bottom: 12px;
+}
+
+.guidance-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.observation-capture-hud {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  right: 10px;
+  z-index: 10;
+  background: rgba(15, 23, 42, 0.88);
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: #ffffff;
+}
+
+.capture-hud-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.capture-frames-badge {
+  background: rgba(13, 148, 136, 0.35);
+  border: 1px solid #14b8a6;
+  color: #5eead4;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.capture-hud-progress {
+  width: 100%;
+  height: 5px;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.capture-hud-bar {
+  height: 100%;
+  background: #14b8a6;
+  transition: width 0.2s linear;
+}
+
+.capture-hud-controls {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.observation-review-box {
+  margin: 14px 0;
+  padding: 16px;
+  background: #ffffff;
+  border: 2px solid #0d9488;
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(13, 148, 136, 0.12);
+}
+
+.review-box-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #e2e8f0;
+  padding-bottom: 10px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.review-box-header h4 {
+  margin: 0;
+  font-size: 13.5px;
+  color: #0f172a;
+}
+
+.review-box-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #e2e8f0;
+  flex-wrap: wrap;
+}
+
+.coordinate-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 10px 0;
+}
+
+@media (max-width: 640px) {
+  .coordinate-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.coordinate-joint-card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 10px;
+}
+
+.coordinate-joint-name {
+  font-weight: 700;
+  color: #0f766e;
+  text-transform: capitalize;
+  margin-bottom: 3px;
+  display: block;
+}
+
+.coordinate-joint-stats {
+  color: #475569;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* ============================================================
    PRINT MEDIA QUERY STYLES
    ============================================================ */
 @media print {
@@ -1798,6 +2006,8 @@ tbody tr:hover { background: #f9fcfa; }
   .step-indicator,
   .result-actions,
   .form-actions,
+  .toast,
+  .disclaimer-footer,
   .notification-toast,
   .records-toolbar {
     display: none !important;

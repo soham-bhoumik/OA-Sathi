@@ -107,16 +107,38 @@ export type SuitabilityStatus =
   | "no-person-detected"
   | "invalid-timestamps";
 
+export interface JointCoordinateRange {
+  minX: number | null;
+  maxX: number | null;
+  minY: number | null;
+  maxY: number | null;
+  meanX: number | null;
+  meanY: number | null;
+  meanVisibility: number | null;
+  trackedFramesCount: number;
+}
+
+export interface LandmarkCoordinateSummary {
+  leftHip: JointCoordinateRange;
+  rightHip: JointCoordinateRange;
+  leftKnee: JointCoordinateRange;
+  rightKnee: JointCoordinateRange;
+  leftAnkle: JointCoordinateRange;
+  rightAnkle: JointCoordinateRange;
+}
+
 export interface TechnicalQualityIndicators {
   framesProcessed: number;
   usableFramesCount: number;
   usableFrameRatio: number;
+  usableFramePercentage: number;
   durationSeconds: number;
   personPresenceRatio: number;
   meanLandmarkConfidence: number;
   suitabilityStatus: SuitabilityStatus;
   suitabilityReasons: string[];
   isSuitableForAnalysis: boolean;
+  coordinateSummary?: LandmarkCoordinateSummary;
 }
 
 export interface MovementFeature<T = number> {
@@ -127,6 +149,10 @@ export interface MovementFeature<T = number> {
   isApproximation: boolean;
   confidence: number; // 0.0 - 1.0
   description: string;
+  requiredLandmarks: string[];
+  calculationFormula: string;
+  assumptionsAndLimitations: string[];
+  clinicallyValidated: boolean; // Always false for these prototype measures
   reasonUnavailable?: string;
 }
 
@@ -292,6 +318,66 @@ export function validatePoseFrame(
 }
 
 /**
+ * Summarizes bounding coordinate ranges and visibility for key anatomical lower-extremity joints.
+ * Computes min, max, mean normalized coordinates without fabricating data for missing points.
+ */
+export function summarizeLandmarkCoordinates(frames: ValidatedPoseFrame[]): LandmarkCoordinateSummary {
+  const getJointSummary = (landmarkIdx: number): JointCoordinateRange => {
+    const xs: number[] = [];
+    const ys: number[] = [];
+    const vis: number[] = [];
+
+    for (const frame of frames) {
+      if (!frame.isUsable) continue;
+      const lm = frame.landmarks[landmarkIdx];
+      if (lm && lm.isValid && lm.x !== null && lm.y !== null) {
+        xs.push(lm.x);
+        ys.push(lm.y);
+        vis.push(lm.visibility ?? 1.0);
+      }
+    }
+
+    if (xs.length === 0) {
+      return {
+        minX: null,
+        maxX: null,
+        minY: null,
+        maxY: null,
+        meanX: null,
+        meanY: null,
+        meanVisibility: null,
+        trackedFramesCount: 0,
+      };
+    }
+
+    const sumX = xs.reduce((a, b) => a + b, 0);
+    const sumY = ys.reduce((a, b) => a + b, 0);
+    const sumVis = vis.reduce((a, b) => a + b, 0);
+    const count = xs.length;
+
+    return {
+      minX: Math.round(Math.min(...xs) * 1000) / 1000,
+      maxX: Math.round(Math.max(...xs) * 1000) / 1000,
+      minY: Math.round(Math.min(...ys) * 1000) / 1000,
+      maxY: Math.round(Math.max(...ys) * 1000) / 1000,
+      meanX: Math.round((sumX / count) * 1000) / 1000,
+      meanY: Math.round((sumY / count) * 1000) / 1000,
+      meanVisibility: Math.round((sumVis / count) * 100) / 100,
+      trackedFramesCount: count,
+    };
+  };
+
+  return {
+    leftHip: getJointSummary(23),
+    rightHip: getJointSummary(24),
+    leftKnee: getJointSummary(25),
+    rightKnee: getJointSummary(26),
+    leftAnkle: getJointSummary(27),
+    rightAnkle: getJointSummary(28),
+  };
+}
+
+/**
  * Computes directly observed technical movement-quality indicators.
  */
 export function evaluateMovementQuality(frames: ValidatedPoseFrame[]): TechnicalQualityIndicators {
@@ -302,12 +388,14 @@ export function evaluateMovementQuality(frames: ValidatedPoseFrame[]): Technical
       framesProcessed: 0,
       usableFramesCount: 0,
       usableFrameRatio: 0,
+      usableFramePercentage: 0,
       durationSeconds: 0,
       personPresenceRatio: 0,
       meanLandmarkConfidence: 0,
       suitabilityStatus: "insufficient-frames",
       suitabilityReasons: ["Sequence contains zero frames"],
       isSuitableForAnalysis: false,
+      coordinateSummary: summarizeLandmarkCoordinates([]),
     };
   }
 
@@ -329,12 +417,14 @@ export function evaluateMovementQuality(frames: ValidatedPoseFrame[]): Technical
       framesProcessed: total,
       usableFramesCount: 0,
       usableFrameRatio: 0,
+      usableFramePercentage: 0,
       durationSeconds: 0,
       personPresenceRatio: 0,
       meanLandmarkConfidence: 0,
       suitabilityStatus: "invalid-timestamps",
       suitabilityReasons: ["Frame timestamps are non-monotonic or disordered"],
       isSuitableForAnalysis: false,
+      coordinateSummary: summarizeLandmarkCoordinates(frames),
     };
   }
 
@@ -352,6 +442,7 @@ export function evaluateMovementQuality(frames: ValidatedPoseFrame[]): Technical
 
   const personPresenceRatio = Math.round((personCount / total) * 100) / 100;
   const usableFrameRatio = Math.round((usableCount / total) * 100) / 100;
+  const usableFramePercentage = Math.round(usableFrameRatio * 100);
   const meanLandmarkConfidence = usableCount > 0 ? Math.round((totalConfidence / usableCount) * 100) / 100 : 0;
 
   const reasons: string[] = [];
@@ -377,21 +468,40 @@ export function evaluateMovementQuality(frames: ValidatedPoseFrame[]): Technical
   const isSuitableForAnalysis =
     usableCount >= MIN_USABLE_FRAMES_FOR_GAIT && durationSeconds >= 1.0 && usableFrameRatio >= 0.4;
 
+  const coordinateSummary = summarizeLandmarkCoordinates(frames);
+
   return {
     framesProcessed: total,
     usableFramesCount: usableCount,
     usableFrameRatio,
+    usableFramePercentage,
     durationSeconds: Math.round(durationSeconds * 10) / 10,
     personPresenceRatio,
     meanLandmarkConfidence,
     suitabilityStatus,
     suitabilityReasons: reasons.length ? reasons : ["Sufficient tracking continuity for exploratory analysis"],
     isSuitableForAnalysis,
+    coordinateSummary,
   };
 }
 
 /**
  * Extracts estimated step cadence (steps per minute) from ankle trajectory peaks.
+ *
+ * Required Landmarks:
+ * - left_ankle (index 27)
+ * - right_ankle (index 28)
+ *
+ * Calculation:
+ * - Identifies alternating local maxima in ankle Y-displacement (ground strikes).
+ * - rawCadence = stepEvents / (durationSeconds / 60)
+ *
+ * Units: steps/min
+ *
+ * Assumptions and Limitations:
+ * - Assumes sagittal/semi-sagittal continuous walking in camera frame.
+ * - Sensitive to foot occlusion or baggy trousers obscuring ankles.
+ * - Non-diagnostic exploratory feature; not validated for clinical gait cadence certification.
  */
 export function extractCadence(
   frames: ValidatedPoseFrame[],
@@ -405,6 +515,14 @@ export function extractCadence(
     isApproximation: true,
     confidence: 0,
     description: "Estimated steps per minute during continuous walking.",
+    requiredLandmarks: ["left_ankle (27)", "right_ankle (28)"],
+    calculationFormula: "Alternating vertical foot ground-contact peaks / (durationSeconds / 60)",
+    assumptionsAndLimitations: [
+      "Assumes continuous straight walking with unobstructed feet.",
+      "Floor plane occlusions or baggy clothing can cause false peak detection.",
+      "Not validated for clinical cadence certification or diagnostic staging.",
+    ],
+    clinicallyValidated: false,
   };
 
   if (!quality.isSuitableForAnalysis || quality.durationSeconds < MIN_DURATION_SECONDS_FOR_CADENCE) {
@@ -467,6 +585,22 @@ export function extractCadence(
 
 /**
  * Extracts bilateral step symmetry index (0 to 1).
+ *
+ * Required Landmarks:
+ * - left_hip (23), right_hip (24)
+ * - left_ankle (27), right_ankle (28)
+ *
+ * Calculation:
+ * - excursion_left = |left_ankle.x - left_hip.x|
+ * - excursion_right = |right_ankle.x - right_hip.x|
+ * - symmetryIndex = min(meanLeft, meanRight) / max(meanLeft, meanRight)
+ *
+ * Units: index (0.0 to 1.0, where 1.0 = equal bilateral step excursions)
+ *
+ * Assumptions and Limitations:
+ * - Assumes walking occurs parallel to camera image plane.
+ * - Angled/diagonal trajectories distort projected bilateral excursions.
+ * - Does not replace clinical force-plate kinetic symmetry testing.
  */
 export function extractStepSymmetry(
   frames: ValidatedPoseFrame[],
@@ -480,6 +614,14 @@ export function extractStepSymmetry(
     isApproximation: true,
     confidence: 0,
     description: "Balance of left vs right step excursion (1.0 = perfect symmetry).",
+    requiredLandmarks: ["left_hip (23)", "right_hip (24)", "left_ankle (27)", "right_ankle (28)"],
+    calculationFormula: "min(meanLeftExcursion, meanRightExcursion) / max(meanLeftExcursion, meanRightExcursion)",
+    assumptionsAndLimitations: [
+      "Requires straight walking path parallel to camera plane.",
+      "Diagonal walking trajectory skews perspective symmetry.",
+      "Does not replace force-plate ground reaction force symmetry measurements.",
+    ],
+    clinicallyValidated: false,
   };
 
   if (!quality.isSuitableForAnalysis) {
@@ -528,6 +670,21 @@ export function extractStepSymmetry(
 
 /**
  * Extracts active knee flexion range in degrees.
+ *
+ * Required Landmarks:
+ * - Hip (23 or 24), Knee (25 or 26), Ankle (27 or 28) for the higher-visibility limb.
+ *
+ * Calculation:
+ * - 2D angle between thigh vector (hip -> knee) and shank vector (ankle -> knee):
+ *   angle = acos( (v1 · v2) / (|v1| * |v2|) ) * (180 / π)
+ * - range = max(angle) - min(angle) across recorded motion.
+ *
+ * Units: degrees (°)
+ *
+ * Assumptions and Limitations:
+ * - Planar 2D projection; out-of-plane rotational components distort true 3D joint angles.
+ * - Does not evaluate passive range of motion or joint end-feel.
+ * - Non-diagnostic exploratory estimate; does not indicate presence or absence of knee OA.
  */
 export function extractKneeFlexionRange(
   frames: ValidatedPoseFrame[],
@@ -541,6 +698,14 @@ export function extractKneeFlexionRange(
     isApproximation: true,
     confidence: 0,
     description: "Estimated excursion angle of the knee joint during the recorded movement.",
+    requiredLandmarks: ["hip (23/24)", "knee (25/26)", "ankle (27/28)"],
+    calculationFormula: "max(acos(v_thigh · v_shank)) - min(acos(v_thigh · v_shank))",
+    assumptionsAndLimitations: [
+      "2D sagittal projection; out-of-plane internal/external rotation causes angle distortion.",
+      "Monocular camera lacks depth calibration of clinical multi-camera 3D motion capture.",
+      "Does not assess passive range of motion or joint contractures.",
+    ],
+    clinicallyValidated: false,
   };
 
   if (!quality.isSuitableForAnalysis) {
@@ -607,6 +772,22 @@ export function extractKneeFlexionRange(
 
 /**
  * Extracts coronal trunk sway (standard deviation of trunk tilt from vertical).
+ *
+ * Required Landmarks:
+ * - left_shoulder (11), right_shoulder (12)
+ * - left_hip (23), right_hip (24)
+ *
+ * Calculation:
+ * - Midpoints: shoulder_mid = (L_shoulder + R_shoulder)/2, hip_mid = (L_hip + R_hip)/2
+ * - Tilt angle = atan2(shoulder_mid.x - hip_mid.x, -(shoulder_mid.y - hip_mid.y)) * (180 / π)
+ * - Sway = standard deviation of tilt angles across the sequence.
+ *
+ * Units: degrees (°)
+ *
+ * Assumptions and Limitations:
+ * - Assumes the camera device is mounted stably and level.
+ * - Loose or asymmetrical clothing can alter midpoint estimations.
+ * - Does not replace medical IMU pelvic obliquity or center-of-pressure force platforms.
  */
 export function extractCoronalTrunkSway(
   frames: ValidatedPoseFrame[],
@@ -620,6 +801,14 @@ export function extractCoronalTrunkSway(
     isApproximation: true,
     confidence: 0,
     description: "Standard deviation of lateral trunk tilt angle during walking.",
+    requiredLandmarks: ["left_shoulder (11)", "right_shoulder (12)", "left_hip (23)", "right_hip (24)"],
+    calculationFormula: "std_dev(abs(atan2(shoulder_mid_x - hip_mid_x, -(shoulder_mid_y - hip_mid_y))))",
+    assumptionsAndLimitations: [
+      "Assumes phone/camera is mounted horizontally and vertically level.",
+      "Loose clothing or asymmetrical posture can displace midpoint approximations.",
+      "Not a replacement for inertial measurement unit (IMU) pelvic obliquity analysis.",
+    ],
+    clinicallyValidated: false,
   };
 
   if (!quality.isSuitableForAnalysis) {

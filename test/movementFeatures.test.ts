@@ -4,6 +4,7 @@ import {
   validateLandmark,
   validatePoseFrame,
   evaluateMovementQuality,
+  summarizeLandmarkCoordinates,
   extractCadence,
   extractStepSymmetry,
   extractKneeFlexionRange,
@@ -12,6 +13,8 @@ import {
   type RawLandmarkInput,
   type ValidatedPoseFrame,
 } from "../src/logic/movementFeatureEvaluation.ts";
+import { convertMovementEvaluationToGaitOutput } from "../src/services/gaitAnalysisService.ts";
+import { evaluateScreening, type FormValues, emptyForm } from "../src/logic/screeningRules.ts";
 
 /**
  * HELPER: Generates a synthetic walking cycle frame sequence for deterministic testing.
@@ -242,5 +245,110 @@ describe("OA-Sathi Movement Feature Evaluation & Quality Indicator Test Suite", 
     assert.equal(frame.hasPerson, false);
     assert.equal(frame.isUsable, false);
     assert.equal(frame.rejectionReason, "No person detected in frame");
+  });
+
+  // 11. Landmark coordinate summaries compute valid min, max, mean normalized bounds
+  it("11. Landmark coordinate summaries compute valid min, max, mean normalized bounds without inventing missing data", () => {
+    const frames = createSyntheticWalkingSequence(45, 0.85, 30);
+    const summary = summarizeLandmarkCoordinates(frames);
+
+    // Left Ankle
+    assert.ok(summary.leftAnkle.trackedFramesCount > 30);
+    assert.ok(summary.leftAnkle.minX !== null && summary.leftAnkle.minX >= 0 && summary.leftAnkle.minX <= 1);
+    assert.ok(summary.leftAnkle.maxX !== null && summary.leftAnkle.maxX >= summary.leftAnkle.minX);
+    assert.ok(summary.leftAnkle.minY !== null && summary.leftAnkle.maxY !== null);
+    assert.ok(summary.leftAnkle.maxY >= summary.leftAnkle.minY);
+    assert.ok(summary.leftAnkle.meanX !== null && summary.leftAnkle.meanY !== null);
+    assert.ok(summary.leftAnkle.meanVisibility !== null && summary.leftAnkle.meanVisibility >= 0.85);
+
+    // Missing landmark in empty sequence returns nulls rather than zeros
+    const emptySummary = summarizeLandmarkCoordinates([]);
+    assert.equal(emptySummary.leftHip.trackedFramesCount, 0);
+    assert.equal(emptySummary.leftHip.minX, null);
+    assert.equal(emptySummary.leftHip.maxX, null);
+    assert.notEqual(emptySummary.leftHip.minX, 0, "Missing landmark bounds must be null, not 0");
+  });
+
+  // 12. Early-stop sequence evaluation (e.g. 2.2s / 40 frames) computes valid quality indicators
+  it("12. Early-stop sequence evaluation (e.g. 2.2s / 40 frames) computes valid quality indicators", () => {
+    const earlyStopFrames = createSyntheticWalkingSequence(40, 0.85, 30); // ~1.3s
+    const result = evaluateMovementSequence(earlyStopFrames, { sequenceId: "early_stop_seq" });
+
+    assert.equal(result.technicalQuality.framesProcessed, 40);
+    assert.ok(result.technicalQuality.durationSeconds >= 1.2);
+    assert.equal(result.technicalQuality.usableFramePercentage, Math.round(result.technicalQuality.usableFrameRatio * 100));
+    assert.ok(result.technicalQuality.coordinateSummary !== undefined);
+  });
+
+  // 13. Unilateral lower-limb occlusion disables bilateral symmetry while preserving active knee flexion
+  it("13. Unilateral lower-limb occlusion disables bilateral symmetry while preserving active knee flexion", () => {
+    const frames = createSyntheticWalkingSequence(50, 0.85, 30);
+    // Severely occlude right ankle and right knee
+    for (const f of frames) {
+      if (f.landmarks[26]) { f.landmarks[26].isValid = false; f.landmarks[26].x = null; }
+      if (f.landmarks[28]) { f.landmarks[28].isValid = false; f.landmarks[28].x = null; }
+    }
+
+    const result = evaluateMovementSequence(frames);
+    // Bilateral step symmetry must be unavailable due to occlusion
+    assert.equal(result.features.stepSymmetry.isValid, false);
+    assert.equal(result.features.stepSymmetry.value, null);
+    assert.ok(result.features.stepSymmetry.reasonUnavailable);
+
+    // Left knee flexion range remains valid because left leg is fully tracked
+    assert.equal(result.features.activeKneeFlexionRange.isValid, true);
+    assert.ok(result.features.activeKneeFlexionRange.value !== null && result.features.activeKneeFlexionRange.value > 0);
+  });
+
+  // 14. MovementFeature interface metadata contains required documentation attributes
+  it("14. MovementFeature interface metadata contains required technical documentation attributes", () => {
+    const frames = createSyntheticWalkingSequence(60, 0.85, 30);
+    const result = evaluateMovementSequence(frames);
+
+    for (const key of ["cadence", "stepSymmetry", "activeKneeFlexionRange", "coronalTrunkSway"] as const) {
+      const feat = result.features[key];
+      assert.ok(Array.isArray(feat.requiredLandmarks) && feat.requiredLandmarks.length > 0, `${key} must document required landmarks`);
+      assert.ok(typeof feat.calculationFormula === "string" && feat.calculationFormula.length > 0, `${key} must document calculation formula`);
+      assert.ok(Array.isArray(feat.assumptionsAndLimitations) && feat.assumptionsAndLimitations.length > 0, `${key} must document assumptions`);
+      assert.equal(feat.clinicallyValidated, false, `${key} must declare clinicallyValidated as false`);
+    }
+  });
+
+  // 15. Attaching movement assessment does not alter patient symptom answers, red flags, or wear score band
+  it("15. Attaching movement assessment does not alter patient symptom answers, red flags, or wear score band", () => {
+    const form: FormValues = {
+      ...emptyForm(),
+      name: "Symptom Test Participant",
+      age: "62",
+      gender: "female",
+      district: "Kamrup Metropolitan",
+      joint: "Knee",
+      painDuration: "1-3-months",
+      painLevel: 5,
+      stiffness: "under-30",
+      mobilityDifficulty: "some",
+      swelling: false,
+      warmthOrRedness: false,
+      suddenInabilityToBearWeight: false,
+      feverOrSystemicSymptoms: false,
+      morningStiffnessOver30: false,
+    };
+
+    const initialScore = evaluateScreening(form);
+
+    // Create a movement evaluation with low symmetry and high sway
+    const frames = createSyntheticWalkingSequence(60, 0.85, 30);
+    const evalResult = evaluateMovementSequence(frames);
+    const gaitOutput = convertMovementEvaluationToGaitOutput(evalResult, form.name);
+
+    // Verify symptom assessment calculation is completely independent of gait output
+    const recheckedScore = evaluateScreening(form);
+    assert.equal(initialScore.score, recheckedScore.score);
+    assert.equal(initialScore.band, recheckedScore.band);
+    assert.equal(initialScore.urgentCareNotice.hasRedFlags, false);
+
+    // Even if gait assessment failed or had low quality, symptom score is unchanged
+    assert.ok(gaitOutput.technicalQuality);
+    assert.equal(gaitOutput.recordId, form.name);
   });
 });
