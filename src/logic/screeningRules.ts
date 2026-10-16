@@ -1,10 +1,27 @@
-export type Page = "overview" | "screening" | "records";
+export type Page = "overview" | "screening" | "records" | "settings" | "doctor" | "report";
 export type Joint = "Knee" | "Hip" | "Hand" | "Other";
 export type RiskBand = "Lower markers" | "Some markers" | "More markers";
-export type TriStateAnswer = boolean | "not-checked" | "unanswered";
+export type TriStateAnswer = boolean | "not-checked" | "unanswered" | "prefer-not-to-answer";
+
+export type SharingStatus = "not-shared" | "shared" | "withdrawn";
+export type ConsultationStatus =
+  | "not-requested"
+  | "requested"
+  | "appointment-confirmed"
+  | "completed"
+  | "cancelled";
+export type DoctorReviewStatus = "awaiting-review" | "reviewed";
+export type FollowUpRecommendation =
+  | "urgent-evaluation"
+  | "clinical-examination"
+  | "imaging-radiology"
+  | "physiotherapy"
+  | "lifestyle-management"
+  | "routine-monitoring";
 
 export const NOT_CHECKED = "not-checked" as const;
 export const UNANSWERED = "unanswered" as const;
+export const PREFER_NOT_TO_ANSWER = "prefer-not-to-answer" as const;
 export const STORAGE_KEY = "oa_sathi_screenings_v1";
 
 export interface FormValues {
@@ -21,7 +38,20 @@ export interface FormValues {
   repeatedLoad: TriStateAnswer;
   heightCm?: string;
   weightKg?: string;
+  // Separate Safety / Red-Flag Questions
+  hasHotRedJointFever?: TriStateAnswer;
+  hasSuddenSeverePainSwelling?: TriStateAnswer;
+  hasInabilityToBearWeight?: TriStateAnswer;
+  // Optional BMD (Bone Mineral Density) measured values (never inferred)
+  bmdTScore?: string;
+  bmdSite?: string;
+  bmdDate?: string;
 }
+
+import type {
+  StructuredGaitAnalysisOutput,
+  ManualGaitObservations,
+} from "../services/gaitAnalysisService";
 
 export interface Screening {
   id: string;
@@ -43,6 +73,27 @@ export interface Screening {
   assessedCount?: number;
   totalQuestions?: number;
   bmi?: number | null;
+  urgentCareNotice?: UrgentCareNotice;
+  gaitAssessment?: StructuredGaitAnalysisOutput;
+  manualGaitObservations?: ManualGaitObservations;
+  // Patient-Doctor Workflow States
+  sharingStatus?: SharingStatus;
+  sharingConsentGivenAt?: number | null;
+  sharingWithdrawnAt?: number | null;
+  consultationStatus?: ConsultationStatus;
+  consultationRequestedAt?: number | null;
+  consultationNotes?: string | null;
+  doctorReviewStatus?: DoctorReviewStatus;
+  doctorReviewedAt?: number | null;
+  doctorReviewerName?: string | null;
+  doctorInternalNotes?: string | null; // clinician-only observations
+  doctorPatientFeedback?: string | null; // patient-facing clinician advice
+  doctorFollowUpRecommendation?: string | null;
+  doctorAppointmentDetails?: string | null;
+  // Optional laboratory BMD (separate from symptoms, never inferred)
+  bmdTScore?: string;
+  bmdSite?: string;
+  bmdDate?: string;
 }
 
 export const districts = [
@@ -80,6 +131,12 @@ export const initialForm: FormValues = {
   repeatedLoad: "unanswered",
   heightCm: "",
   weightKg: "",
+  hasHotRedJointFever: "unanswered",
+  hasSuddenSeverePainSwelling: "unanswered",
+  hasInabilityToBearWeight: "unanswered",
+  bmdTScore: "",
+  bmdSite: "",
+  bmdDate: "",
 };
 
 export const sampleScreenings: Screening[] = [
@@ -119,6 +176,12 @@ export const sampleScreenings: Screening[] = [
     unassessedFactors: [],
     assessedCount: 8,
     totalQuestions: 8,
+    sharingStatus: "shared",
+    sharingConsentGivenAt: Date.now() - 1000 * 60 * 60 * 2,
+    consultationStatus: "requested",
+    consultationRequestedAt: Date.now() - 1000 * 60 * 50,
+    consultationNotes: "Patient reported difficulty with daily walking and prolonged morning knee stiffness.",
+    doctorReviewStatus: "awaiting-review",
   },
   {
     id: "OS-0247",
@@ -156,6 +219,9 @@ export const sampleScreenings: Screening[] = [
     unassessedFactors: [],
     assessedCount: 8,
     totalQuestions: 8,
+    sharingStatus: "not-shared",
+    consultationStatus: "not-requested",
+    doctorReviewStatus: "awaiting-review",
   },
   {
     id: "OS-0246",
@@ -193,6 +259,17 @@ export const sampleScreenings: Screening[] = [
     unassessedFactors: [],
     assessedCount: 8,
     totalQuestions: 8,
+    sharingStatus: "shared",
+    sharingConsentGivenAt: Date.now() - 1000 * 60 * 60 * 4,
+    consultationStatus: "appointment-confirmed",
+    consultationRequestedAt: Date.now() - 1000 * 60 * 60 * 3,
+    doctorReviewStatus: "reviewed",
+    doctorReviewedAt: Date.now() - 1000 * 60 * 60 * 2,
+    doctorReviewerName: "Dr. A. Sharma, MO",
+    doctorInternalNotes: "Mild early presentation. No signs of acute inflammation. Quadriceps strength normal on physical screening.",
+    doctorPatientFeedback: "Symptoms are mild and short in duration. Regular walking and quadriceps strengthening exercises recommended. Schedule follow-up if discomfort persists beyond 4 weeks.",
+    doctorFollowUpRecommendation: "Routine joint health monitoring & light exercise",
+    doctorAppointmentDetails: "Community PHC Room 3 · Next Tuesday at 10:30 am",
   },
 ];
 
@@ -225,6 +302,7 @@ export function emptyForm(): FormValues {
 export function sanitizeText(value: unknown, maxLength = 60): string {
   if (typeof value !== "string") return "";
   return value
+    .replace(/<[^>]*>?/gm, "")
     .replace(/[\x00-\x1F\x7F-\x9F]/g, "")
     .trim()
     .slice(0, maxLength);
@@ -277,6 +355,13 @@ export function exportRecordsToCsv(records: Screening[]): string {
     "Contributing Factors",
     "Absent Findings",
     "Unassessed Factors",
+    "Gait Assessment Status",
+    "Gait Movement Summary",
+    "Sharing Status",
+    "Consultation Status",
+    "Doctor Review Status",
+    "Doctor Follow-Up Recommendation",
+    "Urgent Safety Guidance",
   ];
 
   const lines = [headers.map(escapeCsvField).join(",")];
@@ -286,6 +371,12 @@ export function exportRecordsToCsv(records: Screening[]): string {
       typeof record.assessedCount === "number" && typeof record.totalQuestions === "number"
         ? `${record.assessedCount}/${record.totalQuestions} assessed`
         : "Standard assessment";
+
+    const gaitStatus = record.gaitAssessment ? record.gaitAssessment.status : "Not performed";
+    const gaitSummary =
+      record.gaitAssessment && record.gaitAssessment.status === "completed"
+        ? `Cadence: ${record.gaitAssessment.features.cadence?.value ?? "N/A"} steps/min | Symmetry: ${record.gaitAssessment.features.stepSymmetry?.value ?? "N/A"} | Flexion ROM: ${record.gaitAssessment.features.activeKneeFlexionRange?.value ?? "N/A"} deg`
+        : "None";
 
     const row = [
       record.id,
@@ -308,6 +399,13 @@ export function exportRecordsToCsv(records: Screening[]): string {
       Array.isArray(record.unassessedFactors) && record.unassessedFactors.length > 0
         ? record.unassessedFactors.join(" | ")
         : "None (all assessed)",
+      gaitStatus,
+      gaitSummary,
+      record.sharingStatus || "not-shared",
+      record.consultationStatus || "not-requested",
+      record.doctorReviewStatus || "awaiting-review",
+      record.doctorFollowUpRecommendation || "None recorded",
+      record.urgentCareNotice?.hasRedFlags ? record.urgentCareNotice.flags.join(" | ") : "Standard precautions",
     ];
     lines.push(row.map(escapeCsvField).join(","));
   }
@@ -396,6 +494,53 @@ export function getRiskBand(score: number): RiskBand {
   return "Lower markers";
 }
 
+export interface UrgentCareNotice {
+  hasRedFlags: boolean;
+  flags: string[];
+  guidance: string;
+}
+
+export function checkUrgentCareGuidance(values: Partial<FormValues>): UrgentCareNotice {
+  const flags: string[] = [];
+  const pain = Number(values.painLevel);
+
+  if (Number.isFinite(pain) && pain >= 9) {
+    flags.push("Very high discomfort rating reported (9 or 10 out of 10).");
+  }
+
+  if (values.mobility === "significant" && (values.painDuration === "over-3-months" || (Number.isFinite(pain) && pain >= 8))) {
+    flags.push("Severe daily functional impairment combined with intense or long-standing discomfort.");
+  }
+
+  if (values.hasHotRedJointFever === true) {
+    flags.push("Hot or red joint accompanied by fever reported (concerning for acute inflammation or joint infection).");
+  }
+
+  if (values.hasSuddenSeverePainSwelling === true) {
+    flags.push("Sudden, severe acute joint pain or rapid swelling reported.");
+  }
+
+  if (values.hasInabilityToBearWeight === true) {
+    flags.push("Inability to bear weight on the joint following an acute injury.");
+  }
+
+  if (flags.length > 0) {
+    return {
+      hasRedFlags: true,
+      flags,
+      guidance:
+        "Important medical notice: If experiencing unmanageable pain, a hot or markedly red joint with fever, sudden inability to bear weight, or visible deformity, prompt evaluation by a medical doctor at a primary health centre (PHC) or hospital emergency is advised.",
+    };
+  }
+
+  return {
+    hasRedFlags: false,
+    flags: [],
+    guidance:
+      "General guidance: For ongoing or changing joint symptoms, consult a qualified primary care clinician for examination, lifestyle adaptations, and evidence-based non-pharmacological care.",
+  };
+}
+
 export interface EvaluationResult {
   score: number;
   band: RiskBand;
@@ -407,6 +552,7 @@ export interface EvaluationResult {
   totalQuestions: number;
   isPreliminaryDueToMissingData: boolean;
   bmi: number | null;
+  urgentCareNotice: UrgentCareNotice;
 }
 
 export function evaluateScreening(form: FormValues): EvaluationResult {
@@ -514,6 +660,37 @@ export function evaluateScreening(form: FormValues): EvaluationResult {
     unassessed.push("Frequent heavy or repetitive activity: unanswered.");
   }
 
+  // Safety screening questions
+  if (form.hasHotRedJointFever === true) {
+    contributing.push("Hot or red joint with fever: reported.");
+  } else if (form.hasHotRedJointFever === false) {
+    absent.push("Hot or red joint with fever: not reported.");
+  } else if (form.hasHotRedJointFever === NOT_CHECKED) {
+    unassessed.push("Hot or red joint with fever: not checked.");
+  } else if (form.hasHotRedJointFever === PREFER_NOT_TO_ANSWER) {
+    unassessed.push("Hot or red joint with fever: preferred not to answer.");
+  }
+
+  if (form.hasSuddenSeverePainSwelling === true) {
+    contributing.push("Sudden severe pain or swelling: reported.");
+  } else if (form.hasSuddenSeverePainSwelling === false) {
+    absent.push("Sudden severe pain or swelling: not reported.");
+  } else if (form.hasSuddenSeverePainSwelling === NOT_CHECKED) {
+    unassessed.push("Sudden severe pain or swelling: not checked.");
+  } else if (form.hasSuddenSeverePainSwelling === PREFER_NOT_TO_ANSWER) {
+    unassessed.push("Sudden severe pain or swelling: preferred not to answer.");
+  }
+
+  if (form.hasInabilityToBearWeight === true) {
+    contributing.push("Inability to bear weight after injury: reported.");
+  } else if (form.hasInabilityToBearWeight === false) {
+    absent.push("Inability to bear weight after injury: not reported.");
+  } else if (form.hasInabilityToBearWeight === NOT_CHECKED) {
+    unassessed.push("Inability to bear weight after injury: not checked.");
+  } else if (form.hasInabilityToBearWeight === PREFER_NOT_TO_ANSWER) {
+    unassessed.push("Inability to bear weight after injury: preferred not to answer.");
+  }
+
   // Standard legacy markers list for clean display
   const legacyPreviousLabel =
     form.previousInjury === true
@@ -553,6 +730,7 @@ export function evaluateScreening(form: FormValues): EvaluationResult {
 
   const isPreliminaryDueToMissingData = unassessed.length >= 3;
   const bmi = calculateBMI(form.weightKg, form.heightCm);
+  const urgentCareNotice = checkUrgentCareGuidance(form);
 
   return {
     score,
@@ -565,8 +743,12 @@ export function evaluateScreening(form: FormValues): EvaluationResult {
     totalQuestions,
     isPreliminaryDueToMissingData,
     bmi,
+    urgentCareNotice,
   };
 }
+
+const VALID_JOINTS = new Set(["Knee", "Hip", "Hand", "Other"]);
+const VALID_BANDS = new Set(["Lower markers", "Some markers", "More markers"]);
 
 export function isRecordFromToday(record: { date: string; timestamp?: number }): boolean {
   if (typeof record.timestamp === "number" && !isNaN(record.timestamp)) {
@@ -586,17 +768,42 @@ export function calculateDashboardStats(screenings: Screening[]): {
   today: string;
   followup: string;
 } {
+  const now = new Date();
+  const todayDay = now.getDate();
+  const todayMonth = now.getMonth();
+  const todayYear = now.getFullYear();
+
   let today = 0;
   let followup = 0;
-  for (let i = 0; i < screenings.length; i++) {
+  const len = screenings.length;
+
+  for (let i = 0; i < len; i++) {
     const record = screenings[i];
-    if (isRecordFromToday(record)) today++;
-    if (record.band === "More markers") followup++;
+    const ts = record.timestamp;
+    if (typeof ts === "number" && !isNaN(ts)) {
+      const d = new Date(ts);
+      if (
+        d.getDate() === todayDay &&
+        d.getMonth() === todayMonth &&
+        d.getFullYear() === todayYear
+      ) {
+        today++;
+      } else if (typeof record.date === "string" && record.date.startsWith("Today")) {
+        today++;
+      }
+    } else if (typeof record.date === "string" && record.date.startsWith("Today")) {
+      today++;
+    }
+
+    if (record.band === "More markers") {
+      followup++;
+    }
   }
+
   return {
     today: String(today).padStart(2, "0"),
     followup: String(followup).padStart(2, "0"),
-    total: String(screenings.length).padStart(2, "0"),
+    total: String(len).padStart(2, "0"),
   };
 }
 
@@ -610,6 +817,78 @@ export function generateStableId(existingRecords: Screening[]): string {
   return `OS-${String(maxNumber + 1).padStart(4, "0")}`;
 }
 
+export function clearDemoScreenings(records: Screening[]): Screening[] {
+  return records.filter((r) => !r.isDemo);
+}
+
+export function restoreDemoScreenings(records: Screening[]): Screening[] {
+  const existingIds = new Set(records.map((r) => r.id));
+  const newDemos = sampleScreenings.filter((s) => !existingIds.has(s.id));
+  return [...records, ...newDemos];
+}
+
+export function shareScreeningWithConsent(record: Screening): Screening {
+  return {
+    ...record,
+    sharingStatus: "shared",
+    sharingConsentGivenAt: Date.now(),
+    sharingWithdrawnAt: null,
+    updatedAt: Date.now(),
+  };
+}
+
+export function withdrawSharingConsent(record: Screening): Screening {
+  return {
+    ...record,
+    sharingStatus: "withdrawn",
+    sharingWithdrawnAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+}
+
+export function requestConsultation(record: Screening, notes?: string): Screening {
+  return {
+    ...record,
+    consultationStatus: "requested",
+    consultationRequestedAt: Date.now(),
+    consultationNotes: notes ? sanitizeText(notes, 200) : null,
+    updatedAt: Date.now(),
+  };
+}
+
+export interface DoctorReviewInput {
+  doctorReviewerName: string;
+  doctorInternalNotes: string;
+  doctorPatientFeedback: string;
+  doctorFollowUpRecommendation: string;
+  markAsReviewed: boolean;
+  consultationStatus?: ConsultationStatus;
+  doctorAppointmentDetails?: string;
+}
+
+export function recordDoctorReview(record: Screening, input: DoctorReviewInput): Screening {
+  const isReviewed = input.markAsReviewed || record.doctorReviewStatus === "reviewed";
+  const apptDetails = input.doctorAppointmentDetails ? sanitizeText(input.doctorAppointmentDetails, 200) : record.doctorAppointmentDetails;
+  let consultStatus = input.consultationStatus || record.consultationStatus || "not-requested";
+  // Prevent falsely marking appointment as confirmed without scheduling details
+  if (consultStatus === "appointment-confirmed" && (!apptDetails || !apptDetails.trim())) {
+    consultStatus = record.consultationStatus === "appointment-confirmed" ? "appointment-confirmed" : "requested";
+  }
+
+  return {
+    ...record,
+    doctorReviewStatus: isReviewed ? "reviewed" : "awaiting-review",
+    doctorReviewedAt: isReviewed ? (record.doctorReviewedAt || Date.now()) : null,
+    doctorReviewerName: sanitizeText(input.doctorReviewerName, 80) || "Attending Clinician",
+    doctorInternalNotes: sanitizeText(input.doctorInternalNotes, 500),
+    doctorPatientFeedback: sanitizeText(input.doctorPatientFeedback, 500),
+    doctorFollowUpRecommendation: input.doctorFollowUpRecommendation || "Routine joint health follow-up",
+    consultationStatus: consultStatus,
+    doctorAppointmentDetails: apptDetails || null,
+    updatedAt: Date.now(),
+  };
+}
+
 export function loadStoredScreenings(): Screening[] {
   try {
     if (typeof window === "undefined" || !window.localStorage) {
@@ -618,21 +897,27 @@ export function loadStoredScreenings(): Screening[] {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return sampleScreenings;
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed) && parsed.length > 0) {
-      const validJoints = new Set(["Knee", "Hip", "Hand", "Other"]);
-      const validBands = new Set(["Lower markers", "Some markers", "More markers"]);
-      return parsed.map((item: unknown) => {
-        const record = item as Partial<Screening>;
+    const recordsArray = Array.isArray(parsed)
+      ? parsed
+      : (typeof parsed === "object" && parsed !== null && Array.isArray((parsed as any).records))
+        ? (parsed as any).records
+        : null;
+
+    if (recordsArray) {
+      if (recordsArray.length === 0) return [];
+      return recordsArray
+        .filter((item: unknown): item is Record<string, any> => typeof item === "object" && item !== null)
+        .map((record: Record<string, any>) => {
         const sanitizedId = typeof record.id === "string" && record.id.trim() ? record.id : generateStableId([]);
         const score = typeof record.score === "number" && !isNaN(record.score) ? Math.min(100, Math.max(0, record.score)) : 0;
-        const band = record.band && validBands.has(record.band) ? record.band : getRiskBand(score);
+        const band = record.band && VALID_BANDS.has(record.band) ? record.band : getRiskBand(score);
 
         return {
           id: sanitizedId,
           name: typeof record.name === "string" ? sanitizeText(record.name) : "Anonymised",
           age: typeof record.age === "number" && !isNaN(record.age) ? record.age : 50,
           district: typeof record.district === "string" ? record.district : "Other",
-          joint: (record.joint && validJoints.has(record.joint) ? record.joint : "Other") as Joint,
+          joint: (record.joint && VALID_JOINTS.has(record.joint) ? record.joint : "Other") as Joint,
           score,
           band,
           markers: Array.isArray(record.markers)
@@ -649,6 +934,45 @@ export function loadStoredScreenings(): Screening[] {
           assessedCount: typeof record.assessedCount === "number" ? record.assessedCount : undefined,
           totalQuestions: typeof record.totalQuestions === "number" ? record.totalQuestions : undefined,
           bmi: typeof record.bmi === "number" ? record.bmi : undefined,
+          urgentCareNotice: record.urgentCareNotice,
+          gaitAssessment: record.gaitAssessment,
+          manualGaitObservations: record.manualGaitObservations,
+          sharingStatus:
+            record.sharingStatus === "shared" || record.sharingStatus === "withdrawn"
+              ? record.sharingStatus
+              : "not-shared",
+          sharingConsentGivenAt:
+            typeof record.sharingConsentGivenAt === "number" ? record.sharingConsentGivenAt : null,
+          sharingWithdrawnAt:
+            typeof record.sharingWithdrawnAt === "number" ? record.sharingWithdrawnAt : null,
+          consultationStatus:
+            record.consultationStatus === "requested" ||
+            record.consultationStatus === "appointment-confirmed" ||
+            record.consultationStatus === "completed" ||
+            record.consultationStatus === "cancelled"
+              ? record.consultationStatus
+              : "not-requested",
+          consultationRequestedAt:
+            typeof record.consultationRequestedAt === "number" ? record.consultationRequestedAt : null,
+          consultationNotes:
+            typeof record.consultationNotes === "string" ? sanitizeText(record.consultationNotes, 200) : null,
+          doctorReviewStatus:
+            record.doctorReviewStatus === "reviewed" ? "reviewed" : "awaiting-review",
+          doctorReviewedAt:
+            typeof record.doctorReviewedAt === "number" ? record.doctorReviewedAt : null,
+          doctorReviewerName:
+            typeof record.doctorReviewerName === "string" ? sanitizeText(record.doctorReviewerName, 80) : null,
+          doctorInternalNotes:
+            typeof record.doctorInternalNotes === "string" ? sanitizeText(record.doctorInternalNotes, 500) : null,
+          doctorPatientFeedback:
+            typeof record.doctorPatientFeedback === "string" ? sanitizeText(record.doctorPatientFeedback, 500) : null,
+          doctorFollowUpRecommendation:
+            typeof record.doctorFollowUpRecommendation === "string" ? record.doctorFollowUpRecommendation : null,
+          doctorAppointmentDetails:
+            typeof record.doctorAppointmentDetails === "string" ? sanitizeText(record.doctorAppointmentDetails, 200) : null,
+          bmdTScore: typeof record.bmdTScore === "string" ? record.bmdTScore : undefined,
+          bmdSite: typeof record.bmdSite === "string" ? record.bmdSite : undefined,
+          bmdDate: typeof record.bmdDate === "string" ? record.bmdDate : undefined,
         };
       });
     }
@@ -658,11 +982,14 @@ export function loadStoredScreenings(): Screening[] {
   return sampleScreenings;
 }
 
-export function saveStoredScreenings(records: Screening[]): void {
+export function saveStoredScreenings(records: Screening[], preSerialized?: string): boolean {
   try {
-    if (typeof window === "undefined" || !window.localStorage) return;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+    if (typeof window === "undefined" || !window.localStorage) return false;
+    const payload = preSerialized !== undefined ? preSerialized : JSON.stringify(records);
+    localStorage.setItem(STORAGE_KEY, payload);
+    return true;
   } catch {
-    // Non-blocking quota error handling
+    // Non-blocking quota or security error handling
+    return false;
   }
 }
