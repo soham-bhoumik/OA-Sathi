@@ -11,6 +11,10 @@ import {
   disposeLivePoseLandmarker,
   detectAndDrawPose,
   calculateLiveMetrics,
+  getLandmarkConfidence,
+  recordCameraFrame,
+  recordRenderFrame,
+  setSchedulingMode,
 } from "../src/services/livePoseEstimation.ts";
 
 function createDummyLandmark(x: number, y: number, z: number = 0, visibility: number = 0.9): NormalizedLandmark {
@@ -171,4 +175,67 @@ describe("OA-Sathi MediaPipe Pose Optimization & Telemetry Test Suite", () => {
     assert.ok(metrics.leftKneeAngleDeg !== null, "Left knee angle calculated from smoothed landmarks");
     assert.ok(metrics.leftKneeAngleDeg >= 170 && metrics.leftKneeAngleDeg <= 180, "Standing knee is approximately straight");
   });
+
+  it("11. getLandmarkConfidence evaluates visibility and presence bounds safely", () => {
+    assert.equal(getLandmarkConfidence(undefined), 0);
+    assert.equal(getLandmarkConfidence({ x: 0.5, y: 0.5, z: 0, visibility: 0.85, presence: 0.95 }), 0.85);
+    assert.equal(getLandmarkConfidence({ x: 0.5, y: 0.5, z: 0, visibility: 0.95, presence: 0.70 }), 0.70);
+    // When fields are omitted, safely defaults to 1.0
+    assert.equal(getLandmarkConfidence({ x: 0.5, y: 0.5, z: 0 } as any), 1.0);
+  });
+
+  it("12. recordCameraFrame and recordRenderFrame accurately compute rolling rates", () => {
+    resetPoseTelemetry();
+
+    // Simulate 30 camera frames arriving over 1000ms
+    const t0 = 10000;
+    recordCameraFrame(t0);
+    for (let i = 1; i <= 30; i++) {
+      recordCameraFrame(t0 + i * (1000 / 30));
+    }
+
+    // Simulate 30 overlay render passes over 1000ms
+    recordRenderFrame(t0);
+    for (let i = 1; i <= 30; i++) {
+      recordRenderFrame(t0 + i * (1000 / 30));
+    }
+
+    const t = getPoseTelemetry();
+    assert.ok(t.cameraFps >= 29 && t.cameraFps <= 31, `Camera FPS is ~30 (measured: ${t.cameraFps})`);
+    assert.ok(t.renderFps >= 29 && t.renderFps <= 31, `Render FPS is ~30 (measured: ${t.renderFps})`);
+  });
+
+  it("13. setSchedulingMode switches active scheduling telemetry cleanly", () => {
+    setSchedulingMode("requestVideoFrameCallback");
+    assert.equal(getPoseTelemetry().schedulingMode, "requestVideoFrameCallback");
+
+    setSchedulingMode("requestAnimationFrameFallback");
+    assert.equal(getPoseTelemetry().schedulingMode, "requestAnimationFrameFallback");
+  });
+
+  it("14. In-place smoothing mutates pre-allocated cache without re-allocating new objects", () => {
+    resetSmoothing();
+    const frame1 = create33DummyLandmarks(0.5, 0.5);
+    const smoothed1 = smoothLandmarks(frame1);
+
+    const frame2 = create33DummyLandmarks(0.52, 0.52);
+    const smoothed2 = smoothLandmarks(frame2);
+
+    // Identity check: cache array reference is reused to eliminate GC allocations
+    assert.equal(smoothed1, smoothed2, "Smoothed array memory reference is reused across frames");
+    assert.ok(smoothed2[0].x > 0.5 && smoothed2[0].x < 0.52, "Values are correctly updated in-place");
+  });
+
+  it("15. calculateLiveMetrics handles occluded landmarks without throwing NaN or crashing", () => {
+    const landmarksWithOcclusion = create33DummyLandmarks(0.5, 0.5);
+    // Explicitly set knees to 0 visibility (occluded)
+    landmarksWithOcclusion[25].visibility = 0.1;
+    landmarksWithOcclusion[26].visibility = 0.1;
+
+    const metrics = calculateLiveMetrics(landmarksWithOcclusion);
+    assert.equal(metrics.leftKneeAngleDeg, null, "Occluded left knee returns null instead of false zero or NaN");
+    assert.equal(metrics.rightKneeAngleDeg, null, "Occluded right knee returns null instead of false zero or NaN");
+    assert.equal(metrics.lowerBodyVisible, false, "Correctly identifies lower body as not visible");
+  });
 });
+

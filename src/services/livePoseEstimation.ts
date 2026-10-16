@@ -42,6 +42,9 @@ export interface LiveJointMetrics {
 
 export interface PosePerformanceTelemetry {
   activeDelegate: "GPU" | "CPU" | "uninitialized";
+  cameraFps: number;
+  inferenceFps: number;
+  renderFps: number;
   processedFrames: number;
   skippedFrames: number;
   recentInferenceMs: number;
@@ -49,6 +52,7 @@ export interface PosePerformanceTelemetry {
   effectiveFps: number;
   videoWidth: number;
   videoHeight: number;
+  schedulingMode: "requestVideoFrameCallback" | "requestAnimationFrameFallback";
 }
 
 // MediaPipe Pose Landmark Indices
@@ -100,6 +104,7 @@ let lastResultCache: PoseLandmarkerResult | null = null;
 let lastMetricsCache: LiveJointMetrics | null = null;
 
 let activeDelegate: "GPU" | "CPU" | "uninitialized" = "uninitialized";
+let schedulingMode: "requestVideoFrameCallback" | "requestAnimationFrameFallback" = "requestAnimationFrameFallback";
 let processedFramesCounter = 0;
 let skippedFramesCounter = 0;
 let recentInferenceMs = 0;
@@ -107,9 +112,20 @@ let totalInferenceMs = 0;
 let activeVideoWidth = 0;
 let activeVideoHeight = 0;
 
+// Camera FPS rolling tracker
+let cameraFrameCounter = 0;
+let cameraWindowStart = 0;
+let rollingCameraFps = 0;
+
+// Inference FPS rolling tracker
 let fpsWindowStart = 0;
 let framesInWindow = 0;
 let rollingEffectiveFps = 0;
+
+// Render FPS rolling tracker
+let renderFrameCounter = 0;
+let renderWindowStart = 0;
+let rollingRenderFps = 0;
 
 let smoothedLandmarksCache: NormalizedLandmark[] | null = null;
 
@@ -142,6 +158,49 @@ export function resetPoseTimestamp(): void {
 }
 
 /**
+ * Declares the active frame scheduling mechanism (rVFC vs rAF fallback).
+ */
+export function setSchedulingMode(mode: "requestVideoFrameCallback" | "requestAnimationFrameFallback"): void {
+  schedulingMode = mode;
+}
+
+/**
+ * Records arrival of an optical frame from the camera stream for camera FPS telemetry.
+ */
+export function recordCameraFrame(nowMs: number): void {
+  if (cameraWindowStart === 0) {
+    cameraWindowStart = nowMs;
+    cameraFrameCounter = 1;
+  } else {
+    cameraFrameCounter++;
+    const elapsed = nowMs - cameraWindowStart;
+    if (elapsed >= 1000) {
+      rollingCameraFps = Math.round(((cameraFrameCounter * 1000) / elapsed) * 10) / 10;
+      cameraWindowStart = nowMs;
+      cameraFrameCounter = 0;
+    }
+  }
+}
+
+/**
+ * Records rendering of a visual skeleton overlay on canvas for render FPS telemetry.
+ */
+export function recordRenderFrame(nowMs: number): void {
+  if (renderWindowStart === 0) {
+    renderWindowStart = nowMs;
+    renderFrameCounter = 1;
+  } else {
+    renderFrameCounter++;
+    const elapsed = nowMs - renderWindowStart;
+    if (elapsed >= 1000) {
+      rollingRenderFps = Math.round(((renderFrameCounter * 1000) / elapsed) * 10) / 10;
+      renderWindowStart = nowMs;
+      renderFrameCounter = 0;
+    }
+  }
+}
+
+/**
  * Resets all runtime performance telemetry metrics.
  */
 export function resetPoseTelemetry(): void {
@@ -152,6 +211,12 @@ export function resetPoseTelemetry(): void {
   fpsWindowStart = 0;
   framesInWindow = 0;
   rollingEffectiveFps = 0;
+  cameraFrameCounter = 0;
+  cameraWindowStart = 0;
+  rollingCameraFps = 0;
+  renderFrameCounter = 0;
+  renderWindowStart = 0;
+  rollingRenderFps = 0;
 }
 
 /**
@@ -163,6 +228,9 @@ export function getPoseTelemetry(): PosePerformanceTelemetry {
     : 0;
   return {
     activeDelegate,
+    cameraFps: rollingCameraFps,
+    inferenceFps: rollingEffectiveFps,
+    renderFps: rollingRenderFps,
     processedFrames: processedFramesCounter,
     skippedFrames: skippedFramesCounter,
     recentInferenceMs,
@@ -170,6 +238,7 @@ export function getPoseTelemetry(): PosePerformanceTelemetry {
     effectiveFps: rollingEffectiveFps,
     videoWidth: activeVideoWidth,
     videoHeight: activeVideoHeight,
+    schedulingMode,
   };
 }
 
@@ -181,10 +250,23 @@ export function getActiveDelegate(): "GPU" | "CPU" | "uninitialized" {
 }
 
 /**
+ * Computes a robust composite confidence metric for a landmark by evaluating both visibility and presence.
+ */
+export function getLandmarkConfidence(lm?: NormalizedLandmark): number {
+  if (!lm) return 0;
+  const vis = lm.visibility !== undefined ? lm.visibility : (lm.presence !== undefined ? lm.presence : 1.0);
+  const pres = lm.presence !== undefined ? lm.presence : 1.0;
+  return Math.max(0, Math.min(1, Math.min(vis, pres)));
+}
+
+/**
  * Applies an adaptive Exponential Moving Average (EMA) filter to 33 raw MediaPipe pose landmarks.
  * Dynamic alpha:
  * - Low displacement (< 0.01 norm dist): alpha = 0.60 (heavily dampens sensor jitter during standing/resting)
  * - High displacement (> 0.08 norm dist): alpha = 0.92 (tracks rapid joint excursion without perceptible lag)
+ *
+ * Memory optimization: Updates cached objects in-place to eliminate garbage collection pressure
+ * in real-time camera loops.
  */
 export function smoothLandmarks(rawLandmarks: NormalizedLandmark[]): NormalizedLandmark[] {
   if (!rawLandmarks || rawLandmarks.length === 0) {
@@ -196,7 +278,6 @@ export function smoothLandmarks(rawLandmarks: NormalizedLandmark[]): NormalizedL
     return smoothedLandmarksCache;
   }
 
-  const smoothed: NormalizedLandmark[] = new Array(rawLandmarks.length);
   for (let i = 0; i < rawLandmarks.length; i++) {
     const cur = rawLandmarks[i];
     const prev = smoothedLandmarksCache[i];
@@ -208,17 +289,15 @@ export function smoothLandmarks(rawLandmarks: NormalizedLandmark[]): NormalizedL
     const normalizedSpeed = Math.min(1, dist / 0.08);
     const alpha = 0.60 + normalizedSpeed * 0.32;
 
-    smoothed[i] = {
-      x: alpha * cur.x + (1 - alpha) * prev.x,
-      y: alpha * cur.y + (1 - alpha) * prev.y,
-      z: alpha * (cur.z ?? 0) + (1 - alpha) * (prev.z ?? 0),
-      visibility: cur.visibility,
-      presence: cur.presence,
-    };
+    // Mutate in-place to avoid allocating 33 new heap objects every frame
+    prev.x = alpha * cur.x + (1 - alpha) * prev.x;
+    prev.y = alpha * cur.y + (1 - alpha) * prev.y;
+    prev.z = alpha * (cur.z ?? 0) + (1 - alpha) * (prev.z ?? 0);
+    prev.visibility = cur.visibility;
+    prev.presence = cur.presence;
   }
 
-  smoothedLandmarksCache = smoothed;
-  return smoothed;
+  return smoothedLandmarksCache;
 }
 
 /**
@@ -458,6 +537,7 @@ export function detectAndDrawPose(
 
   // 1. Draw Skeleton Connectors & Joints if overlay enabled
   if (drawOverlay) {
+    recordRenderFrame(performance.now());
     ctx.save();
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
@@ -472,8 +552,8 @@ export function detectAndDrawPose(
       if (
         lmStart &&
         lmEnd &&
-        (lmStart.visibility ?? 1) >= 0.35 &&
-        (lmEnd.visibility ?? 1) >= 0.35
+        getLandmarkConfidence(lmStart) >= 0.35 &&
+        getLandmarkConfidence(lmEnd) >= 0.35
       ) {
         ctx.beginPath();
         ctx.moveTo(lmStart.x * w, lmStart.y * h);
@@ -492,8 +572,8 @@ export function detectAndDrawPose(
       if (
         lmStart &&
         lmEnd &&
-        (lmStart.visibility ?? 1) >= 0.35 &&
-        (lmEnd.visibility ?? 1) >= 0.35
+        getLandmarkConfidence(lmStart) >= 0.35 &&
+        getLandmarkConfidence(lmEnd) >= 0.35
       ) {
         // Accent lower extremities with cyan
         const isLegBone =
@@ -514,8 +594,8 @@ export function detectAndDrawPose(
     // 2. Draw Landmark Joints with concentric rings
     for (let i = 0; i < landmarks.length; i++) {
       const lm = landmarks[i];
-      const visibility = lm.visibility ?? 1;
-      if (visibility < 0.35) continue;
+      const confidence = getLandmarkConfidence(lm);
+      if (confidence < 0.35) continue;
 
       const x = lm.x * w;
       const y = lm.y * h;
@@ -602,14 +682,21 @@ export function calculateLiveMetrics(landmarks: NormalizedLandmark[]): LiveJoint
     a?: NormalizedLandmark
   ): number | null => {
     if (!h || !k || !a) return null;
-    const minVis = Math.min(h.visibility ?? 0, k.visibility ?? 0, a.visibility ?? 0);
-    if (minVis < 0.4) return null;
+    const minConf = Math.min(
+      getLandmarkConfidence(h),
+      getLandmarkConfidence(k),
+      getLandmarkConfidence(a)
+    );
+    if (minConf < 0.4) return null;
 
-    const v1 = { x: h.x - k.x, y: h.y - k.y };
-    const v2 = { x: a.x - k.x, y: a.y - k.y };
-    const dot = v1.x * v2.x + v1.y * v2.y;
-    const mag1 = Math.sqrt(v1.x * v1.x + v1.y * v1.y);
-    const mag2 = Math.sqrt(v2.x * v2.x + v2.y * v2.y);
+    // Zero-allocation scalar vector arithmetic
+    const v1x = h.x - k.x;
+    const v1y = h.y - k.y;
+    const v2x = a.x - k.x;
+    const v2y = a.y - k.y;
+    const dot = v1x * v2x + v1y * v2y;
+    const mag1 = Math.sqrt(v1x * v1x + v1y * v1y);
+    const mag2 = Math.sqrt(v2x * v2x + v2y * v2y);
     if (mag1 > 0.001 && mag2 > 0.001) {
       const cosTheta = Math.max(-1, Math.min(1, dot / (mag1 * mag2)));
       return Math.round(Math.acos(cosTheta) * (180 / Math.PI));
@@ -620,9 +707,9 @@ export function calculateLiveMetrics(landmarks: NormalizedLandmark[]): LiveJoint
   leftKneeAngleDeg = computeKneeAngle(lHip, lKnee, lAnkle);
   rightKneeAngleDeg = computeKneeAngle(rHip, rKnee, rAnkle);
 
-  // Primary knee angle (prefer the one with higher minimum landmark visibility)
-  const lVis = Math.min(lHip?.visibility ?? 0, lKnee?.visibility ?? 0, lAnkle?.visibility ?? 0);
-  const rVis = Math.min(rHip?.visibility ?? 0, rKnee?.visibility ?? 0, rAnkle?.visibility ?? 0);
+  // Primary knee angle (prefer the one with higher minimum landmark confidence)
+  const lVis = Math.min(getLandmarkConfidence(lHip), getLandmarkConfidence(lKnee), getLandmarkConfidence(lAnkle));
+  const rVis = Math.min(getLandmarkConfidence(rHip), getLandmarkConfidence(rKnee), getLandmarkConfidence(rAnkle));
   if (lVis >= 0.4 || rVis >= 0.4) {
     kneeAngleDeg = lVis >= rVis ? leftKneeAngleDeg : rightKneeAngleDeg;
     if (kneeAngleDeg === null) {
@@ -637,10 +724,10 @@ export function calculateLiveMetrics(landmarks: NormalizedLandmark[]): LiveJoint
     lHip &&
     rHip &&
     Math.min(
-      lShoulder.visibility ?? 0,
-      rShoulder.visibility ?? 0,
-      lHip.visibility ?? 0,
-      rHip.visibility ?? 0
+      getLandmarkConfidence(lShoulder),
+      getLandmarkConfidence(rShoulder),
+      getLandmarkConfidence(lHip),
+      getLandmarkConfidence(rHip)
     ) >= 0.4
   ) {
     const sMidX = (lShoulder.x + rShoulder.x) / 2;
@@ -656,7 +743,7 @@ export function calculateLiveMetrics(landmarks: NormalizedLandmark[]): LiveJoint
   if (
     lShoulder &&
     rShoulder &&
-    Math.min(lShoulder.visibility ?? 0, rShoulder.visibility ?? 0) >= 0.4
+    Math.min(getLandmarkConfidence(lShoulder), getLandmarkConfidence(rShoulder)) >= 0.4
   ) {
     const dx = rShoulder.x - lShoulder.x;
     const dy = rShoulder.y - lShoulder.y;
@@ -664,17 +751,22 @@ export function calculateLiveMetrics(landmarks: NormalizedLandmark[]): LiveJoint
   }
 
   // Coronal pelvic level tilt
-  if (lHip && rHip && Math.min(lHip.visibility ?? 0, rHip.visibility ?? 0) >= 0.4) {
+  if (lHip && rHip && Math.min(getLandmarkConfidence(lHip), getLandmarkConfidence(rHip)) >= 0.4) {
     const dx = rHip.x - lHip.x;
     const dy = rHip.y - lHip.y;
     pelvicTiltDeg = Math.round(Math.abs(Math.atan2(dy, dx) * (180 / Math.PI)) * 10) / 10;
   }
 
-  const visibilities = landmarks.map((l) => l.visibility ?? 1);
-  const confidenceScore = Math.round((visibilities.reduce((a, b) => a + b, 0) / Math.max(1, landmarks.length)) * 100);
+  // Zero-allocation confidence calculation loop
+  let totalConfidence = 0;
+  const landmarkCount = landmarks.length;
+  for (let i = 0; i < landmarkCount; i++) {
+    totalConfidence += getLandmarkConfidence(landmarks[i]);
+  }
+  const confidenceScore = landmarkCount > 0 ? Math.round((totalConfidence / landmarkCount) * 100) : 0;
 
   const personInView = Boolean(
-    lShoulder && rShoulder && (lShoulder.visibility ?? 0) >= 0.35 && (rShoulder.visibility ?? 0) >= 0.35
+    lShoulder && rShoulder && getLandmarkConfidence(lShoulder) >= 0.35 && getLandmarkConfidence(rShoulder) >= 0.35
   );
   const lowerBodyVisible = leftKneeAngleDeg !== null || rightKneeAngleDeg !== null;
 

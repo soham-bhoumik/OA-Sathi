@@ -135,6 +135,8 @@ import {
   getPoseTelemetry,
   resetPoseTelemetry,
   resetSmoothing,
+  recordCameraFrame,
+  setSchedulingMode,
   type LivePoseStatus,
   type LiveJointMetrics,
   type PosePerformanceTelemetry,
@@ -2294,6 +2296,7 @@ const MovementCard = memo(function MovementCard({
   const gaitStatus = getGaitAnalysisStatus(cameraStatus === "ready", gaitAssessment);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [livePoseStatus, setLivePoseStatus] = useState<LivePoseStatus>("uninitialized");
+  const lastLivePoseStatusRef = useRef<LivePoseStatus>("uninitialized");
   const [poseMetrics, setPoseMetrics] = useState<LiveJointMetrics>(getEmptyLiveMetrics());
   const [showOverlay, setShowOverlay] = useState<boolean>(enablePoseOverlay);
   const showOverlayRef = useRef<boolean>(showOverlay);
@@ -2652,6 +2655,7 @@ const MovementCard = memo(function MovementCard({
 
   useEffect(() => {
     if (cameraStatus !== "ready") {
+      lastLivePoseStatusRef.current = "uninitialized";
       setLivePoseStatus("uninitialized");
       setPoseMetrics(getEmptyLiveMetrics());
       return;
@@ -2659,11 +2663,19 @@ const MovementCard = memo(function MovementCard({
 
     let isMounted = true;
     let animId: number | null = null;
+    let vfcHandle: number | null = null;
     let isInferring = false;
     let lastMetricsTime = 0;
     let lastInferenceCallTime = 0;
     let landmarker: any = null;
 
+    const isVfcSupported =
+      typeof HTMLVideoElement !== "undefined" &&
+      typeof (HTMLVideoElement.prototype as any).requestVideoFrameCallback === "function";
+
+    setSchedulingMode(isVfcSupported ? "requestVideoFrameCallback" : "requestAnimationFrameFallback");
+
+    lastLivePoseStatusRef.current = "loading-model";
     setLivePoseStatus("loading-model");
     setPoseError("");
 
@@ -2671,91 +2683,127 @@ const MovementCard = memo(function MovementCard({
       .then((instance) => {
         if (!isMounted) return;
         landmarker = instance;
+        lastLivePoseStatusRef.current = "model-ready";
         setLivePoseStatus("model-ready");
 
-        const loop = () => {
+        const processFrame = (now: number) => {
           if (!isMounted) return;
 
           const video = videoRef.current;
           const canvas = canvasRef.current;
 
-          if (video && canvas && landmarker && video.readyState >= 2 && !video.paused && !video.ended) {
-            if (!isInferring) {
-              const now = performance.now();
-              const currentTargetFps = targetFpsRef.current;
-              const minInterval = currentTargetFps > 0 ? (1000 / currentTargetFps) - 1.0 : 0;
+          if (!video || !canvas || !landmarker || video.readyState < 2 || video.paused || video.ended) {
+            return;
+          }
 
-              if (now - lastInferenceCallTime >= minInterval) {
-                lastInferenceCallTime = now;
-                isInferring = true;
-                try {
-                  const { result, metrics } = detectAndDrawPose(
-                    landmarker,
-                    video,
-                    canvas,
-                    now,
-                    showOverlayRef.current
-                  );
-                  if (result && result.landmarks && result.landmarks.length > 0) {
-                    setLivePoseStatus("tracking-active");
-                  } else {
-                    setLivePoseStatus("no-person-detected");
-                  }
+          recordCameraFrame(now);
 
-                  // Buffer validated pose frames during recording clip
-                  if (recordingActiveRef.current) {
-                    const lms = result?.landmarks?.[0] || [];
-                    const vFrame = validatePoseFrame(lms, now, frameCounterRef.current++);
-                    recordedFramesRef.current.push(vFrame);
-                  }
+          if (!isInferring) {
+            const currentTargetFps = targetFpsRef.current;
+            const minInterval = currentTargetFps > 0 ? (1000 / currentTargetFps) - 1.0 : 0;
 
-                  // Buffer validated pose frames during movement checklist task recording
-                  if (checklistRecordingActiveRef.current) {
-                    const lms = result?.landmarks?.[0] || [];
-                    const vFrame = validatePoseFrame(lms, now, frameCounterRef.current++);
-                    checklistFramesRef.current.push(vFrame);
-                  }
+            if (now - lastInferenceCallTime >= minInterval) {
+              lastInferenceCallTime = now;
+              isInferring = true;
+              try {
+                const { result, metrics } = detectAndDrawPose(
+                  landmarker,
+                  video,
+                  canvas,
+                  now,
+                  showOverlayRef.current
+                );
 
-                  // Throttle React state updates to avoid unnecessary renders
-                  if (now - lastMetricsTime > 150) {
-                    lastMetricsTime = now;
-                    setPoseMetrics(metrics);
-                  }
-                } catch {
-                  // Drop frame on timing error
-                } finally {
-                  isInferring = false;
+                const nextStatus: LivePoseStatus =
+                  result && result.landmarks && result.landmarks.length > 0
+                    ? "tracking-active"
+                    : "no-person-detected";
+
+                // Eliminate redundant React state dispatches on the hot path
+                if (lastLivePoseStatusRef.current !== nextStatus) {
+                  lastLivePoseStatusRef.current = nextStatus;
+                  setLivePoseStatus(nextStatus);
                 }
+
+                // Buffer validated pose frames during recording clip
+                if (recordingActiveRef.current) {
+                  const lms = result?.landmarks?.[0] || [];
+                  const vFrame = validatePoseFrame(lms, now, frameCounterRef.current++);
+                  recordedFramesRef.current.push(vFrame);
+                }
+
+                // Buffer validated pose frames during movement checklist task recording
+                if (checklistRecordingActiveRef.current) {
+                  const lms = result?.landmarks?.[0] || [];
+                  const vFrame = validatePoseFrame(lms, now, frameCounterRef.current++);
+                  checklistFramesRef.current.push(vFrame);
+                }
+
+                // Throttle React state updates to avoid unnecessary renders
+                if (now - lastMetricsTime > 150) {
+                  lastMetricsTime = now;
+                  setPoseMetrics(metrics);
+                }
+              } catch {
+                // Drop frame on timing error
+              } finally {
+                isInferring = false;
               }
             }
           }
+        };
 
-          animId = requestAnimationFrame(loop);
+        const scheduleNextFrame = () => {
+          if (!isMounted) return;
+          const video = videoRef.current;
+
+          if (isVfcSupported && video && typeof (video as any).requestVideoFrameCallback === "function") {
+            vfcHandle = (video as any).requestVideoFrameCallback((now: number) => {
+              processFrame(now);
+              scheduleNextFrame();
+            });
+          } else {
+            animId = requestAnimationFrame((now: number) => {
+              processFrame(now);
+              scheduleNextFrame();
+            });
+          }
+        };
+
+        const cancelScheduledFrame = () => {
+          const video = videoRef.current;
+          if (vfcHandle !== null && video && typeof (video as any).cancelVideoFrameCallback === "function") {
+            (video as any).cancelVideoFrameCallback(vfcHandle);
+            vfcHandle = null;
+          }
+          if (animId !== null) {
+            cancelAnimationFrame(animId);
+            animId = null;
+          }
         };
 
         const handleVisibilityChange = () => {
           if (document.hidden) {
-            if (animId !== null) {
-              cancelAnimationFrame(animId);
-              animId = null;
-            }
+            cancelScheduledFrame();
           } else {
             resetPoseTimestamp();
-            if (animId === null && isMounted && landmarker) {
-              animId = requestAnimationFrame(loop);
+            if (isMounted && landmarker) {
+              scheduleNextFrame();
             }
           }
         };
 
         document.addEventListener("visibilitychange", handleVisibilityChange);
-        animId = requestAnimationFrame(loop);
+        scheduleNextFrame();
 
         return () => {
           document.removeEventListener("visibilitychange", handleVisibilityChange);
+          cancelScheduledFrame();
         };
       })
       .catch((err) => {
         if (!isMounted) return;
+        lastLivePoseStatusRef.current = "error";
         setLivePoseStatus("error");
         setPoseError(
           err instanceof Error
@@ -2766,6 +2814,10 @@ const MovementCard = memo(function MovementCard({
 
     return () => {
       isMounted = false;
+      const video = videoRef.current;
+      if (vfcHandle !== null && video && typeof (video as any).cancelVideoFrameCallback === "function") {
+        (video as any).cancelVideoFrameCallback(vfcHandle);
+      }
       if (animId !== null) {
         cancelAnimationFrame(animId);
       }
@@ -3279,10 +3331,26 @@ const MovementCard = memo(function MovementCard({
 
           <div className="diagnostics-grid">
             <div className="diagnostics-tile">
+              <span className="diag-label">Camera Stream FPS</span>
+              <span className="diag-val">
+                {diagnosticsTelemetry.cameraFps > 0
+                  ? `${diagnosticsTelemetry.cameraFps} FPS`
+                  : cameraStatus === "ready"
+                    ? "~30 FPS"
+                    : "Idle"}
+              </span>
+              <span className="diag-sub">
+                {diagnosticsTelemetry.schedulingMode === "requestVideoFrameCallback"
+                  ? "rVFC Native Video Sync"
+                  : "rAF Compatible Fallback"}
+              </span>
+            </div>
+
+            <div className="diagnostics-tile">
               <span className="diag-label">Inference Rate</span>
               <span className="diag-val">
-                {diagnosticsTelemetry.effectiveFps > 0
-                  ? `${diagnosticsTelemetry.effectiveFps} FPS`
+                {diagnosticsTelemetry.inferenceFps > 0
+                  ? `${diagnosticsTelemetry.inferenceFps} FPS`
                   : diagnosticsTelemetry.processedFrames > 0
                     ? "~30 FPS"
                     : "Idle"}
@@ -3305,15 +3373,25 @@ const MovementCard = memo(function MovementCard({
             </div>
 
             <div className="diagnostics-tile">
-              <span className="diag-label">Frames Processed</span>
-              <span className="diag-val">{diagnosticsTelemetry.processedFrames}</span>
-              <span className="diag-sub">Optical frames inferred</span>
+              <span className="diag-label">Overlay Render FPS</span>
+              <span className="diag-val">
+                {diagnosticsTelemetry.renderFps > 0
+                  ? `${diagnosticsTelemetry.renderFps} FPS`
+                  : showOverlay
+                    ? "Active"
+                    : "Overlay Off"}
+              </span>
+              <span className="diag-sub">
+                Canvas overlay refresh
+              </span>
             </div>
 
             <div className="diagnostics-tile">
-              <span className="diag-label">Frames Skipped</span>
-              <span className="diag-val">{diagnosticsTelemetry.skippedFrames}</span>
-              <span className="diag-sub">Identical timestamps saved</span>
+              <span className="diag-label">Frames (Proc / Skip)</span>
+              <span className="diag-val">
+                {diagnosticsTelemetry.processedFrames} / {diagnosticsTelemetry.skippedFrames}
+              </span>
+              <span className="diag-sub">Inferred vs identical skipped</span>
             </div>
 
             <div className="diagnostics-tile">
