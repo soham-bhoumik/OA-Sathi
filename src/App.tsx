@@ -20,6 +20,8 @@ import {
   BadgeCheck,
   Bell,
   CalendarDays,
+  Camera,
+  CameraOff,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -32,6 +34,7 @@ import {
   FileEdit,
   FileHeart,
   FilePlus2,
+  FlipHorizontal,
   HeartPulse,
   HelpCircle,
   Info,
@@ -57,7 +60,11 @@ import {
   Sparkles,
   Stethoscope,
   Trash2,
+  Upload,
   Users,
+  FileImage,
+  Layers,
+  AlertCircle,
   X,
 } from "lucide-react";
 
@@ -123,9 +130,28 @@ import {
 import {
   getLivePoseLandmarker,
   detectAndDrawPose,
+  resetPoseTimestamp,
+  getEmptyLiveMetrics,
   type LivePoseStatus,
   type LiveJointMetrics,
 } from "./services/livePoseEstimation";
+import {
+  type XrayView,
+  type KneeLaterality,
+  type KLGrade,
+  type XrayAnalysisOutput,
+  type XrayDoctorReview,
+  type XrayAuditEntry,
+  KL_GRADE_DESCRIPTIONS,
+  BENCHMARK_XRAY_FIXTURES,
+  validateXrayFile,
+  checkViewSuitability,
+  DEFAULT_XRAY_MODEL_METADATA,
+} from "./logic/xrayModels";
+import {
+  analyzeKneeXray,
+  postXrayAuditEvent,
+} from "./services/xrayAnalysisService";
 
 const PAIN_DURATION_CHOICES = [
   ["under-2-weeks", "Less than 2 weeks"],
@@ -179,7 +205,7 @@ function App() {
   const [consent, setConsent] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [cameraStatus, setCameraStatus] = useState<"idle" | "ready" | "unsupported" | "denied" | "error">("idle");
+  const [cameraStatus, setCameraStatus] = useState<"idle" | "requesting" | "ready" | "unsupported" | "denied" | "error">("idle");
   const [cameraMessage, setCameraMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [gaitAssessment, setGaitAssessment] = useState<StructuredGaitAnalysisOutput | null>(null);
@@ -231,6 +257,7 @@ function App() {
 
   const stopCamera = useCallback(() => {
     isRequestingCameraRef.current = false;
+    resetPoseTimestamp();
     if (recordingTimerRef.current) {
       clearInterval(recordingTimerRef.current);
       recordingTimerRef.current = null;
@@ -298,6 +325,10 @@ function App() {
     }
 
     isRequestingCameraRef.current = true;
+    setCameraStatus("requesting");
+    setCameraMessage("");
+    resetPoseTimestamp();
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "user" },
@@ -1575,7 +1606,7 @@ const ScreeningPage = memo(function ScreeningPage({
   onShareConsent: (record: Screening) => void;
   onWithdrawConsent: (record: Screening) => void;
   onRequestConsultation: (record: Screening, notes?: string) => void;
-  cameraStatus: "idle" | "ready" | "unsupported" | "denied" | "error";
+  cameraStatus: "idle" | "requesting" | "ready" | "unsupported" | "denied" | "error";
   cameraMessage: string;
   onStartCamera: () => void;
   onStopCamera: () => void;
@@ -2229,7 +2260,7 @@ const MovementCard = memo(function MovementCard({
   onCommitObservation,
   participantName,
 }: {
-  cameraStatus: "idle" | "ready" | "unsupported" | "denied" | "error";
+  cameraStatus: "idle" | "requesting" | "ready" | "unsupported" | "denied" | "error";
   cameraMessage: string;
   onStartCamera: () => void;
   onStopCamera: () => void;
@@ -2251,13 +2282,10 @@ const MovementCard = memo(function MovementCard({
   const gaitStatus = getGaitAnalysisStatus(cameraStatus === "ready", gaitAssessment);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [livePoseStatus, setLivePoseStatus] = useState<LivePoseStatus>("uninitialized");
-  const [poseMetrics, setPoseMetrics] = useState<LiveJointMetrics>({
-    kneeAngleDeg: null,
-    trunkTiltDeg: null,
-    confidenceScore: 0,
-    landmarksDetected: 0,
-  });
+  const [poseMetrics, setPoseMetrics] = useState<LiveJointMetrics>(getEmptyLiveMetrics());
   const [showOverlay, setShowOverlay] = useState<boolean>(enablePoseOverlay);
+  const [isMirrored, setIsMirrored] = useState<boolean>(true);
+  const [videoAspectRatio, setVideoAspectRatio] = useState<string>("16 / 9");
   const [poseError, setPoseError] = useState<string>("");
   const [retryTrigger, setRetryTrigger] = useState<number>(0);
 
@@ -2272,6 +2300,21 @@ const MovementCard = memo(function MovementCard({
   const recordingActiveRef = useRef<boolean>(false);
   const recordedFramesRef = useRef<ValidatedPoseFrame[]>([]);
   const frameCounterRef = useRef<number>(0);
+
+  // Auto-adapt camera viewport to camera hardware aspect ratio to eliminate letterboxing and cropping
+  const handleLoadedMetadata = useCallback((e: React.SyntheticEvent<HTMLVideoElement>) => {
+    const v = e.currentTarget;
+    if (v.videoWidth > 0 && v.videoHeight > 0) {
+      setVideoAspectRatio(`${v.videoWidth} / ${v.videoHeight}`);
+    }
+  }, []);
+
+  // Guaranteed camera track release when MovementCard unmounts
+  useEffect(() => {
+    return () => {
+      onStopCamera();
+    };
+  }, [onStopCamera]);
 
   const handleStopAndReview = useCallback(() => {
     if (captureTimerRef.current !== null) {
@@ -2394,12 +2437,7 @@ const MovementCard = memo(function MovementCard({
   useEffect(() => {
     if (cameraStatus !== "ready") {
       setLivePoseStatus("uninitialized");
-      setPoseMetrics({
-        kneeAngleDeg: null,
-        trunkTiltDeg: null,
-        confidenceScore: 0,
-        landmarksDetected: 0,
-      });
+      setPoseMetrics(getEmptyLiveMetrics());
       return;
     }
 
@@ -2444,7 +2482,7 @@ const MovementCard = memo(function MovementCard({
                 }
 
                 // Throttle React state updates to avoid unnecessary renders
-                if (now - lastMetricsTime > 200) {
+                if (now - lastMetricsTime > 150) {
                   lastMetricsTime = now;
                   setPoseMetrics(metrics);
                 }
@@ -2548,8 +2586,9 @@ const MovementCard = memo(function MovementCard({
           type="button"
           className="button button-secondary"
           onClick={cameraStatus === "ready" ? onStopCamera : onStartCamera}
+          disabled={cameraStatus === "requesting"}
         >
-          {cameraStatus === "ready" ? "Stop camera" : "Open camera"}
+          {cameraStatus === "ready" ? "Stop camera" : cameraStatus === "requesting" ? "Opening camera..." : "Open camera"}
         </button>
 
         {cameraStatus === "ready" && (
@@ -2603,12 +2642,24 @@ const MovementCard = memo(function MovementCard({
           </button>
         )}
 
+        {cameraStatus === "ready" && (
+          <button
+            type="button"
+            className={`button button-secondary ${isMirrored ? "active" : ""}`}
+            onClick={() => setIsMirrored((v) => !v)}
+            title="Toggle horizontal mirror orientation for user-facing camera"
+          >
+            <FlipHorizontal size={13} />
+            {isMirrored ? "Mirror: ON" : "Mirror: OFF"}
+          </button>
+        )}
+
         {cameraStatus === "ready" && !isRecordingClip && observationStage !== "capturing" && (
           <span className="camera-live-indicator">Camera live</span>
         )}
       </div>
 
-      {/* PHASE 9: Controlled Observation Guidance Card */}
+      {/* Controlled Observation Guidance Card */}
       {observationStage === "guidance" && (
         <div className="observation-guidance-card">
           <div className="guidance-header">
@@ -2661,20 +2712,115 @@ const MovementCard = memo(function MovementCard({
         </div>
       )}
 
-      <div className={`camera-panel ${cameraStatus === "ready" ? "camera-visible" : ""}`} style={{ position: "relative" }}>
+      {/* Main Camera Viewport with Responsive Aspect Ratio */}
+      <div
+        className={`camera-panel ${cameraStatus === "ready" ? "camera-visible" : ""}`}
+        style={{ position: "relative", aspectRatio: videoAspectRatio }}
+      >
         <video
           ref={videoRef}
-          className="camera-video"
+          className={`camera-video ${isMirrored ? "mirrored" : ""}`}
           style={{ display: cameraStatus === "ready" ? "block" : "none" }}
           playsInline
           muted
           autoPlay
+          onLoadedMetadata={handleLoadedMetadata}
         />
         <canvas
           ref={canvasRef}
-          className="pose-canvas-overlay"
+          className={`pose-canvas-overlay ${isMirrored ? "mirrored" : ""}`}
           style={{ display: cameraStatus === "ready" ? "block" : "none" }}
         />
+
+        {/* State 1: Idle (Setup & Privacy Notice) */}
+        {cameraStatus === "idle" && (
+          <div className="camera-state-card">
+            <div className="camera-state-icon">
+              <Camera size={26} />
+            </div>
+            <div className="camera-state-title">Camera-Based Movement Observation</div>
+            <div className="camera-state-desc">
+              Demonstrates real-time body landmark tracking and exploratory joint excursion metrics.
+              Position your device at waist or chest height so your full body is visible.
+            </div>
+            <div className="camera-state-privacy">
+              <ShieldCheck size={13} />
+              <span>100% In-Browser MediaPipe AI · Zero video recorded or transmitted</span>
+            </div>
+            <div className="camera-state-actions">
+              <button type="button" className="button button-primary" onClick={onStartCamera}>
+                <Camera size={14} /> Open camera & begin
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* State 2: Requesting camera permission */}
+        {cameraStatus === "requesting" && (
+          <div className="camera-state-card">
+            <div className="camera-state-icon">
+              <Camera size={26} className="recording-live-pulse" />
+            </div>
+            <div className="camera-state-title">Requesting Camera Access...</div>
+            <div className="camera-state-desc">
+              Please click "Allow" in your browser's permission prompt to enable live landmark tracking.
+            </div>
+          </div>
+        )}
+
+        {/* State 3: Denied permission */}
+        {cameraStatus === "denied" && (
+          <div className="camera-state-card">
+            <div className="camera-state-icon state-denied">
+              <CameraOff size={26} />
+            </div>
+            <div className="camera-state-title">Camera Permission Blocked</div>
+            <div className="camera-state-desc">
+              Camera access was denied. To enable movement tracking, click the camera or lock icon in your browser's address bar, choose "Allow", and retry.
+            </div>
+            <div className="camera-state-actions">
+              <button type="button" className="button button-primary" onClick={onStartCamera}>
+                <RefreshCw size={14} /> Try permission again
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* State 4: Unsupported */}
+        {cameraStatus === "unsupported" && (
+          <div className="camera-state-card">
+            <div className="camera-state-icon state-error">
+              <AlertCircle size={26} />
+            </div>
+            <div className="camera-state-title">Camera Not Supported</div>
+            <div className="camera-state-desc">
+              This browser environment does not support mediaDevices.getUserMedia. You can still complete the assessment using the manual visual checklist below or test the benchmark walking cycle.
+            </div>
+            <div className="camera-state-actions">
+              <button type="button" className="button button-secondary" onClick={onRunBenchmark}>
+                <Play size={14} /> Test benchmark clip
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* State 5: Camera error */}
+        {cameraStatus === "error" && (
+          <div className="camera-state-card">
+            <div className="camera-state-icon state-error">
+              <AlertTriangle size={26} />
+            </div>
+            <div className="camera-state-title">Unable to Start Camera</div>
+            <div className="camera-state-desc">
+              {cameraMessage || "The camera could not be started. Check if another application is using the camera and retry."}
+            </div>
+            <div className="camera-state-actions">
+              <button type="button" className="button button-primary" onClick={onStartCamera}>
+                <RefreshCw size={14} /> Retry camera
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Live Observation Capture HUD with Early Stop */}
         {observationStage === "capturing" && (
@@ -2731,42 +2877,102 @@ const MovementCard = memo(function MovementCard({
                         : "Camera ready"}
               </span>
 
-              <span className="pose-engine-tag">Local MediaPipe Pose (Lite)</span>
+              <div className="pose-hud-controls">
+                <button
+                  type="button"
+                  className={`pose-hud-btn ${isMirrored ? "active" : ""}`}
+                  onClick={() => setIsMirrored((v) => !v)}
+                  title="Toggle mirror view for self-facing camera"
+                >
+                  <FlipHorizontal size={11} /> {isMirrored ? "Mirror: ON" : "Mirror: OFF"}
+                </button>
+                <button
+                  type="button"
+                  className={`pose-hud-btn ${showOverlay ? "active" : ""}`}
+                  onClick={() => setShowOverlay((v) => !v)}
+                  title="Toggle skeleton connector overlay"
+                >
+                  {showOverlay ? <Eye size={11} /> : <EyeOff size={11} />}
+                  {showOverlay ? "Overlay: ON" : "Overlay: OFF"}
+                </button>
+              </div>
             </div>
 
             {livePoseStatus === "tracking-active" && (
               <div className="pose-hud-bottom">
                 <div className="pose-metrics-group">
-                  {poseMetrics.kneeAngleDeg !== null && (
-                    <div className="pose-metric-tag">
-                      <span>Knee angle</span>
-                      <strong>{poseMetrics.kneeAngleDeg}°</strong>
+                  {poseMetrics.leftKneeAngleDeg !== null ? (
+                    <div className="pose-metric-tag" title="Left knee interior angle (Hip-Knee-Ankle). 180° = fully extended standing.">
+                      <span>L Knee Angle</span>
+                      <strong>{poseMetrics.leftKneeAngleDeg}°</strong>
+                    </div>
+                  ) : (
+                    <div className="pose-metric-tag" style={{ opacity: 0.7 }}>
+                      <span>L Knee Angle</span>
+                      <strong style={{ fontSize: "8.5px", color: "#94a3b8" }}>Occluded</strong>
                     </div>
                   )}
+
+                  {poseMetrics.rightKneeAngleDeg !== null ? (
+                    <div className="pose-metric-tag" title="Right knee interior angle (Hip-Knee-Ankle). 180° = fully extended standing.">
+                      <span>R Knee Angle</span>
+                      <strong>{poseMetrics.rightKneeAngleDeg}°</strong>
+                    </div>
+                  ) : (
+                    <div className="pose-metric-tag" style={{ opacity: 0.7 }}>
+                      <span>R Knee Angle</span>
+                      <strong style={{ fontSize: "8.5px", color: "#94a3b8" }}>Occluded</strong>
+                    </div>
+                  )}
+
                   {poseMetrics.trunkTiltDeg !== null && (
-                    <div className="pose-metric-tag">
-                      <span>Trunk sway</span>
+                    <div className="pose-metric-tag" title="Coronal trunk tilt relative to vertical. 0° = vertical upright posture.">
+                      <span>Trunk Sway</span>
                       <strong>{poseMetrics.trunkTiltDeg}°</strong>
                     </div>
                   )}
+
+                  {poseMetrics.shoulderTiltDeg !== null && (
+                    <div className="pose-metric-tag" title="Bilateral shoulder alignment relative to horizontal. 0° = level shoulders.">
+                      <span>Shoulder Level</span>
+                      <strong>{poseMetrics.shoulderTiltDeg}°</strong>
+                    </div>
+                  )}
+
                   {poseMetrics.confidenceScore > 0 && (
-                    <div className="pose-metric-tag">
+                    <div className="pose-metric-tag" title="Mean detection visibility across 33 body landmarks">
                       <span>Tracking</span>
                       <strong>{poseMetrics.confidenceScore}%</strong>
                     </div>
                   )}
                 </div>
+
+                {/* Real-time Framing Guidance Helper */}
+                <div
+                  className={`pose-guidance-pill ${
+                    poseMetrics.trackingQuality === "good"
+                      ? "guidance-good"
+                      : poseMetrics.trackingQuality === "fair"
+                        ? "guidance-warn"
+                        : "guidance-neutral"
+                  }`}
+                >
+                  {poseMetrics.trackingQuality === "good"
+                    ? "✓ Full-body tracking ready"
+                    : poseMetrics.lowerBodyVisible
+                      ? "⚡ Fair tracking · Step back slightly"
+                      : poseMetrics.personInView
+                        ? "⚠ Step back 2–3m · Legs occluded"
+                        : "Stand in camera frame"}
+                </div>
               </div>
             )}
           </>
         )}
+      </div>
 
-        <div
-          className="camera-placeholder"
-          style={{ display: cameraStatus === "ready" ? "none" : "grid" }}
-        >
-          <span>Camera feed appears here when available.</span>
-        </div>
+      <div className="movement-disclaimer-card" role="note">
+        <strong>Movement Assessment Notice:</strong> Camera-based movement observations are experimental and may be affected by camera angle, lighting, clothing, occlusion, and tracking quality. They do not diagnose osteoarthritis or replace evaluation by a qualified healthcare professional.
       </div>
 
       {/* PHASE 9: Pre-Save Observation Review Box */}
@@ -4805,6 +5011,133 @@ const MedicalReportView = memo(function MedicalReportView({
           </div>
         )}
 
+        {/* Section 6B: Radiographic Knee X-Ray & AI-Assisted Imaging Review (if present) */}
+        {record.xrayReview && (
+          <div className="report-section-block">
+            <div className="report-section-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>6B. Radiographic Knee X-Ray &amp; AI-Assisted Imaging Review</span>
+              <span className="care-badge reviewed" style={{ fontSize: "7px", padding: "2px 6px" }}>
+                {record.xrayReview.reviewStatus === "finalized" ? "Clinically Finalized" : "Preliminary / Under Review"}
+              </span>
+            </div>
+            <div className="report-section-body">
+              {/* Radiograph details grid */}
+              <div className="report-grid-two" style={{ marginBottom: "8px" }}>
+                <div className="report-data-pair">
+                  <span>Anatomical Region &amp; Side</span>
+                  <strong>Knee Joint ({record.xrayReview.laterality} Side)</strong>
+                </div>
+                <div className="report-data-pair">
+                  <span>Radiographic Projection / View</span>
+                  <strong>{record.xrayReview.view} View (Standing Weight-Bearing)</strong>
+                </div>
+                <div className="report-data-pair">
+                  <span>Reviewing Clinician</span>
+                  <strong>{record.xrayReview.clinicianReviewerName}</strong>
+                </div>
+                <div className="report-data-pair">
+                  <span>Review Date</span>
+                  <strong>{new Date(record.xrayReview.reviewedAt).toLocaleDateString()}</strong>
+                </div>
+              </div>
+
+              {/* AI vs Clinician Comparison Banner */}
+              <div
+                style={{
+                  background: record.xrayReview.clinicianCorrectionReason ? "#fffbeb" : "#f0fdf4",
+                  border: `1px solid ${record.xrayReview.clinicianCorrectionReason ? "#fde68a" : "#bbf7d0"}`,
+                  borderRadius: "6px",
+                  padding: "8px 10px",
+                  marginBottom: "10px",
+                  fontSize: "8px",
+                  lineHeight: "1.4",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+                  <strong style={{ color: record.xrayReview.clinicianCorrectionReason ? "#92400e" : "#166534" }}>
+                    {record.xrayReview.clinicianCorrectionReason
+                      ? "Clinician Radiographic Correction Recorded"
+                      : "AI Preliminary Finding Concurred by Clinician"}
+                  </strong>
+                  <span style={{ fontSize: "7px", color: "#64748b" }}>
+                    Model: {record.xrayReview.aiOutput?.modelName || record.xrayReview.aiAnalysis?.modelName || DEFAULT_XRAY_MODEL_METADATA.modelName} (v{record.xrayReview.aiOutput?.modelVersion || record.xrayReview.aiAnalysis?.modelVersion || "1.0.0"})
+                  </span>
+                </div>
+                <div style={{ display: "flex", gap: "16px", marginTop: "4px" }}>
+                  <div>
+                    <span style={{ fontSize: "7px", color: "#64748b", textTransform: "uppercase" }}>AI Preliminary Finding:</span>
+                    <div style={{ fontWeight: 700, color: "#1e293b" }}>
+                      {(record.xrayReview.aiOutput?.abstained || record.xrayReview.aiAnalysis?.status === "abstained")
+                        ? "Abstained (Manual Review Required)"
+                        : record.xrayReview.aiOutput?.predictedKlGrade !== undefined
+                          ? `KL Grade ${record.xrayReview.aiOutput.predictedKlGrade} (${Math.round((record.xrayReview.aiOutput.confidence ?? 0.75) * 100)}% conf)`
+                          : record.xrayReview.aiAnalysis?.predictedKlGrade !== undefined
+                            ? `KL Grade ${record.xrayReview.aiAnalysis.predictedKlGrade} (${Math.round((record.xrayReview.aiAnalysis.modelConfidence ?? 0.75) * 100)}% conf)`
+                            : "Analysis pending"}
+                    </div>
+                  </div>
+                  <div>
+                    <span style={{ fontSize: "7px", color: "#64748b", textTransform: "uppercase" }}>Clinician Confirmed Grade:</span>
+                    <div style={{ fontWeight: 700, color: "#0f766e" }}>
+                      {record.xrayReview.clinicianConfirmedKlGrade !== null && record.xrayReview.clinicianConfirmedKlGrade !== "unassigned" && record.xrayReview.clinicianConfirmedKlGrade !== undefined
+                        ? `KL Grade ${record.xrayReview.clinicianConfirmedKlGrade} (${KL_GRADE_DESCRIPTIONS[record.xrayReview.clinicianConfirmedKlGrade]?.label || ""})`
+                        : "Indeterminate / Non-diagnostic"}
+                    </div>
+                  </div>
+                </div>
+                {record.xrayReview.clinicianCorrectionReason && (
+                  <div style={{ marginTop: "6px", paddingTop: "6px", borderTop: "1px dashed #fcd34d", color: "#92400e" }}>
+                    <strong>Clinician Discrepancy Note:</strong> {record.xrayReview.clinicianCorrectionReason}
+                  </div>
+                )}
+              </div>
+
+              {/* Independent Findings Table */}
+              <div className="report-grid-two" style={{ marginBottom: "8px" }}>
+                <div className="report-data-pair">
+                  <span>Joint Space Narrowing</span>
+                  <strong style={{ textTransform: "capitalize" }}>{record.xrayReview.clinicianFindings.jointSpaceNarrowing}</strong>
+                </div>
+                <div className="report-data-pair">
+                  <span>Osteophyte Formation</span>
+                  <strong style={{ textTransform: "capitalize" }}>{record.xrayReview.clinicianFindings.osteophytes}</strong>
+                </div>
+                <div className="report-data-pair">
+                  <span>Subchondral Sclerosis</span>
+                  <strong>{record.xrayReview.clinicianFindings.subchondralSclerosis ? "Present" : "Absent"}</strong>
+                </div>
+                <div className="report-data-pair">
+                  <span>Subchondral Cysts / Bone Deformity</span>
+                  <strong>{record.xrayReview.clinicianFindings.boneDeformityOrCysts ? "Present" : "Absent"}</strong>
+                </div>
+              </div>
+
+              {/* Clinical Impression & Recommendation */}
+              <div style={{ marginBottom: "8px" }}>
+                <span style={{ display: "block", fontSize: "7.5px", color: "#749086", textTransform: "uppercase", fontWeight: 700 }}>
+                  Doctor's Radiographic Impression:
+                </span>
+                <p style={{ margin: "2px 0 0", fontSize: "8.5px", color: "#1e293b", lineHeight: "1.45" }}>
+                  {record.xrayReview.clinicianImpression}
+                </p>
+              </div>
+
+              <div>
+                <span style={{ display: "block", fontSize: "7.5px", color: "#749086", textTransform: "uppercase", fontWeight: 700 }}>
+                  Imaging-Guided Recommendation:
+                </span>
+                <strong style={{ fontSize: "9px", color: "#0f766e" }}>
+                  {record.xrayReview.recommendation}
+                </strong>
+              </div>
+
+              <div style={{ fontSize: "7px", color: "#64748b", fontStyle: "italic", marginTop: "8px" }}>
+                * AI radiograph analysis is an investigational clinical decision aid. Final diagnostic assessment and clinical management remain the sole professional responsibility of the reviewing clinician.
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Section 7: Doctor Review & Recommendations */}
         <div className="report-section-block">
           <div className="report-section-header">7. Clinician Review &amp; Follow-Up Recommendation</div>
@@ -4913,6 +5246,1063 @@ const MedicalReportView = memo(function MedicalReportView({
   );
 });
 
+const DoctorXrayReviewPanel = memo(function DoctorXrayReviewPanel({
+  selectedRecord,
+  allScreenings,
+  onSelectPatient,
+  onUpdateScreening,
+  onViewReport,
+}: {
+  selectedRecord: Screening | null;
+  allScreenings: Screening[];
+  onSelectPatient: (id: string) => void;
+  onUpdateScreening: (updated: Screening) => void;
+  onViewReport: (record: Screening) => void;
+}) {
+  // 1. Consent and Authorization Verification
+  const [consentConfirmed, setConsentConfirmed] = useState(false);
+
+  // 2. Anatomical Setup
+  const [laterality, setLaterality] = useState<KneeLaterality>("Right");
+  const [xrayView, setXrayView] = useState<XrayView>("AP");
+  const [selectedFixtureId, setSelectedFixtureId] = useState<string>("none");
+
+  // 3. Image Input State
+  const [imageSrc, setImageSrc] = useState<string | null>(null);
+  const [fileMeta, setFileMeta] = useState<{ name: string; size: number; dimensions?: string; isDemo?: boolean } | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // 4. AI Inference State
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [analysisOutput, setAnalysisOutput] = useState<XrayAnalysisOutput | null>(null);
+
+  // 5. Clinician Review Form State
+  const [reviewerName, setReviewerName] = useState("Dr. A. Sharma, MO (Radiology / Orthopaedics)");
+  const [jointSpaceNarrowing, setJointSpaceNarrowing] = useState<"none" | "mild" | "moderate" | "severe">("none");
+  const [osteophytes, setOsteophytes] = useState<"none" | "doubtful" | "definite" | "large">("none");
+  const [subchondralSclerosis, setSubchondralSclerosis] = useState<boolean>(false);
+  const [boneDeformityOrCysts, setBoneDeformityOrCysts] = useState<boolean>(false);
+  const [confirmedKlGrade, setConfirmedKlGrade] = useState<KLGrade | "indeterminate">("indeterminate");
+  const [clinicianOverrideReason, setClinicianOverrideReason] = useState("");
+  const [clinicianImpression, setClinicianImpression] = useState("");
+  const [recommendation, setRecommendation] = useState<string>("Routine monitoring & joint protection");
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+
+  // 6. Audit Trail State
+  const [auditEntries, setAuditEntries] = useState<XrayAuditEntry[]>([]);
+  const [showAuditTrail, setShowAuditTrail] = useState(false);
+
+  // View suitability check
+  const viewSuitability = useMemo(() => checkViewSuitability(xrayView), [xrayView]);
+
+  // Sync state if selected record already has an X-ray review
+  useEffect(() => {
+    if (selectedRecord?.xrayReview) {
+      const xr = selectedRecord.xrayReview;
+      setLaterality(xr.laterality);
+      setXrayView(xr.view);
+      if (xr.imageDataUrl) {
+        setImageSrc(xr.imageDataUrl);
+        setFileMeta({
+          name: "stored_patient_radiograph.png",
+          size: Math.round(xr.imageDataUrl.length * 0.75),
+          dimensions: "Archived Radiograph",
+        });
+      }
+      setAnalysisOutput(xr.aiOutput || xr.aiAnalysis || null);
+      setReviewerName(xr.clinicianReviewerName || xr.doctorReviewerName || "Dr. A. Sharma, MO (Radiology / Orthopaedics)");
+      setJointSpaceNarrowing((xr.clinicianFindings.jointSpaceNarrowing === "unspecified" ? "none" : xr.clinicianFindings.jointSpaceNarrowing) || "none");
+      setOsteophytes((xr.clinicianFindings.osteophytes === "unspecified" ? "none" : xr.clinicianFindings.osteophytes) || "none");
+      setSubchondralSclerosis(Boolean(xr.clinicianFindings.subchondralSclerosis));
+      setBoneDeformityOrCysts(Boolean(xr.clinicianFindings.boneDeformityOrCysts || xr.clinicianFindings.deformityOrSubluxation));
+      setConfirmedKlGrade(
+        xr.clinicianConfirmedKlGrade !== null && xr.clinicianConfirmedKlGrade !== "unassigned" && xr.clinicianConfirmedKlGrade !== undefined
+          ? xr.clinicianConfirmedKlGrade
+          : "indeterminate"
+      );
+      setClinicianOverrideReason(xr.clinicianCorrectionReason || "");
+      setClinicianImpression(xr.clinicianImpression || xr.clinicianFindings.radiologistNotes || "");
+      setRecommendation(xr.recommendation || xr.followUpRecommendations || "Routine monitoring & joint protection");
+      setConsentConfirmed(true);
+      if (xr.auditTrail && xr.auditTrail.length > 0) {
+        setAuditEntries(xr.auditTrail);
+      }
+    } else {
+      setAnalysisOutput(null);
+      setImageSrc(null);
+      setFileMeta(null);
+      setSelectedFixtureId("none");
+      setConsentConfirmed(false);
+      setSaveMessage(null);
+      setAnalysisError(null);
+      setConfirmedKlGrade("indeterminate");
+      setClinicianOverrideReason("");
+      setClinicianImpression("");
+      setJointSpaceNarrowing("none");
+      setOsteophytes("none");
+      setSubchondralSclerosis(false);
+      setBoneDeformityOrCysts(false);
+    }
+  }, [selectedRecord?.id]);
+
+  // Handle selecting a benchmark fixture
+  const handleSelectFixture = (fixtureId: string) => {
+    setSelectedFixtureId(fixtureId);
+    setFileError(null);
+    setAnalysisError(null);
+    setSaveMessage(null);
+
+    if (fixtureId === "none") {
+      setImageSrc(null);
+      setFileMeta(null);
+      return;
+    }
+
+    const fixture = BENCHMARK_XRAY_FIXTURES.find((f) => f.id === fixtureId);
+    if (!fixture) return;
+
+    const dataUrl = fixture.dataUrl || fixture.svgDataUri;
+    setImageSrc(dataUrl);
+    setLaterality(fixture.laterality);
+    setXrayView(fixture.view);
+    setFileMeta({
+      name: `${fixture.id}.svg`,
+      size: dataUrl.length,
+      dimensions: "512 x 512 px (Benchmark Radiograph)",
+      isDemo: true,
+    });
+    setConsentConfirmed(true);
+  };
+
+  // Handle custom file upload
+  const handleFileUpload = (file: File) => {
+    const validation = validateXrayFile(file);
+    if (!validation.isValid) {
+      setFileError(validation.errorMessage || "Unsupported file format.");
+      return;
+    }
+
+    setFileError(null);
+    setAnalysisError(null);
+    setSelectedFixtureId("none");
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string;
+      setImageSrc(dataUrl);
+      setFileMeta({
+        name: file.name,
+        size: file.size,
+        isDemo: false,
+      });
+
+      const img = new Image();
+      img.onload = () => {
+        setFileMeta({
+          name: file.name,
+          size: file.size,
+          dimensions: `${img.naturalWidth} x ${img.naturalHeight} px`,
+          isDemo: false,
+        });
+      };
+      img.src = dataUrl;
+    };
+    reader.onerror = () => {
+      setFileError("Error reading image file from disk.");
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Run AI analysis
+  const handleRunAnalysis = async () => {
+    if (!selectedRecord) {
+      setAnalysisError("Please select an authorized patient before initiating AI analysis.");
+      return;
+    }
+    if (!consentConfirmed) {
+      setAnalysisError("Clinician imaging authorization and patient consent must be verified prior to processing.");
+      return;
+    }
+    if (!imageSrc) {
+      setAnalysisError("Please upload a knee radiograph or select a benchmark fixture.");
+      return;
+    }
+
+    setIsAnalyzing(true);
+    setAnalysisError(null);
+    setSaveMessage(null);
+
+    try {
+      const output = await analyzeKneeXray(imageSrc, {
+        patientId: selectedRecord.id,
+        laterality,
+        view: xrayView,
+        imageDate: new Date().toISOString(),
+      });
+
+      setAnalysisOutput(output);
+
+      // Pre-fill clinician grade if not already entered
+      if (confirmedKlGrade === "indeterminate" && output.predictedKlGrade !== undefined && output.predictedKlGrade !== null) {
+        setConfirmedKlGrade(output.predictedKlGrade);
+      }
+
+      // Pre-populate findings based on AI gradient profile
+      if (output.predictedKlGrade !== undefined && output.predictedKlGrade !== null) {
+        if (output.predictedKlGrade >= 3) {
+          setJointSpaceNarrowing("moderate");
+          setOsteophytes("definite");
+          setSubchondralSclerosis(true);
+        } else if (output.predictedKlGrade === 2) {
+          setJointSpaceNarrowing("mild");
+          setOsteophytes("definite");
+        } else if (output.predictedKlGrade === 1) {
+          setOsteophytes("doubtful");
+        }
+      }
+
+      const auditEntry: XrayAuditEntry = {
+        id: `AUD-${Date.now().toString(36)}`,
+        eventId: `AUD-${Date.now().toString(36)}`,
+        timestamp: Date.now(),
+        action: output.abstained ? "ABSTENTION_RECORDED" : "AI_INFERENCE_COMPLETED",
+        eventType: output.abstained ? "analysis_abstained" : "analysis_completed",
+        actor: reviewerName.trim() || "Attending Medical Officer",
+        doctorId: reviewerName.trim() || "Attending Medical Officer",
+        patientId: selectedRecord.id,
+        details: output.abstained
+          ? `Model abstained on view ${xrayView}: ${output.abstentionReason || "Unsupported view"}`
+          : `AI completed radiograph analysis. Predicted KL-${output.predictedKlGrade ?? "N/A"} (Confidence: ${Math.round((output.confidence ?? output.modelConfidence ?? 0) * 100)}%)`,
+      };
+      setAuditEntries((prev) => [auditEntry, ...prev]);
+
+      await postXrayAuditEvent(
+        output.abstained ? "ABSTENTION_RECORDED" : "AI_INFERENCE_COMPLETED",
+        reviewerName.trim() || "Attending Medical Officer",
+        selectedRecord.id,
+        auditEntry.details
+      );
+    } catch (err) {
+      setAnalysisError(
+        err instanceof Error
+          ? err.message
+          : "Failed to process radiograph. Model service is temporarily unavailable."
+      );
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  // Save clinician review
+  const handleSaveReview = async () => {
+    if (!selectedRecord) return;
+    if (!analysisOutput) {
+      setAnalysisError("Cannot finalize review without running radiograph analysis.");
+      return;
+    }
+    if (!reviewerName.trim()) {
+      setAnalysisError("Reviewing clinician name and designation are required for clinical traceability.");
+      return;
+    }
+
+    const finalConfirmedGrade = confirmedKlGrade === "indeterminate" ? null : confirmedKlGrade;
+    const isOverride =
+      analysisOutput.predictedKlGrade !== undefined &&
+      analysisOutput.predictedKlGrade !== null &&
+      finalConfirmedGrade !== null &&
+      finalConfirmedGrade !== analysisOutput.predictedKlGrade;
+
+    if (isOverride && !clinicianOverrideReason.trim()) {
+      setAnalysisError(
+        `Clinician Override Flagged: AI predicted KL-${analysisOutput.predictedKlGrade}, but you confirmed KL-${finalConfirmedGrade}. Please document clinical rationale for this adjustment.`
+      );
+      return;
+    }
+
+    setIsSaving(true);
+    setAnalysisError(null);
+
+    try {
+      const reviewAuditEntry: XrayAuditEntry = {
+        id: `AUD-${Date.now().toString(36)}`,
+        eventId: `AUD-${Date.now().toString(36)}`,
+        timestamp: Date.now(),
+        action: isOverride ? "CLINICIAN_OVERRIDE_RECORDED" : "CLINICAL_REVIEW_FINALIZED",
+        eventType: isOverride ? "clinician_reviewed" : "report_finalized",
+        actor: reviewerName.trim(),
+        doctorId: reviewerName.trim(),
+        patientId: selectedRecord.id,
+        details: isOverride
+          ? `Clinician override (AI: KL-${analysisOutput.predictedKlGrade} -> Confirmed: KL-${finalConfirmedGrade}). Rationale: ${clinicianOverrideReason.trim()}`
+          : `Clinician finalized review: Confirmed KL-${finalConfirmedGrade ?? "Indeterminate"} for ${laterality} knee (${xrayView} view).`,
+      };
+
+      const updatedAuditTrail = [reviewAuditEntry, ...auditEntries];
+
+      const xrayReview: XrayDoctorReview = {
+        reviewId: selectedRecord.xrayReview?.reviewId || `XR-${Date.now().toString(36).toUpperCase()}`,
+        patientId: selectedRecord.id,
+        imageDate: new Date().toISOString(),
+        laterality,
+        view: xrayView,
+        imageDataUrl: imageSrc || undefined,
+        previewDataUrl: imageSrc || undefined,
+        aiOutput: analysisOutput,
+        aiAnalysis: analysisOutput,
+        doctorReviewerName: reviewerName.trim(),
+        clinicianReviewerName: reviewerName.trim(),
+        doctorReviewerDesignation: "Medical Officer / Radiologist",
+        clinicianReviewerDesignation: "Medical Officer / Radiologist",
+        reviewedAt: Date.now(),
+        reviewStatus: "finalized",
+        clinicianFindings: {
+          jointSpaceNarrowing,
+          osteophytes,
+          subchondralSclerosis,
+          boneDeformityOrCysts,
+          deformityOrSubluxation: boneDeformityOrCysts,
+          radiologistNotes: clinicianImpression.trim(),
+        },
+        clinicianConfirmedKlGrade: finalConfirmedGrade,
+        clinicianCorrectionReason: isOverride ? clinicianOverrideReason.trim() : undefined,
+        clinicianImpression: clinicianImpression.trim() || `Radiographic evaluation finalized by ${reviewerName.trim()}.`,
+        recommendation,
+        followUpRecommendations: recommendation,
+        auditTrail: updatedAuditTrail,
+      };
+
+      const updatedRecord: Screening = {
+        ...selectedRecord,
+        xrayReview,
+        doctorReviewStatus: "reviewed",
+        doctorReviewedAt: Date.now(),
+        doctorReviewerName: reviewerName.trim(),
+      };
+
+      onUpdateScreening(updatedRecord);
+      setAuditEntries(updatedAuditTrail);
+      setSaveMessage(`X-ray clinical review successfully finalized and attached to patient record ${selectedRecord.id}.`);
+
+      await postXrayAuditEvent(
+        reviewAuditEntry.action || "REVIEW_FINALIZED",
+        reviewerName.trim(),
+        selectedRecord.id,
+        reviewAuditEntry.details
+      );
+    } catch (err) {
+      setAnalysisError(err instanceof Error ? err.message : "Failed to save X-ray review.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Helper to load or create demo patient
+  const handleLoadDemoPatient = () => {
+    const demoPatient: Screening = {
+      id: `DEMO-XR-${Date.now().toString(36).toUpperCase()}`,
+      name: "Sunita Verma (Demo X-Ray)",
+      age: 58,
+      district: "East Khasi Hills",
+      joint: "Knee",
+      score: 8,
+      band: "More markers",
+      markers: ["Morning stiffness", "Weight-bearing pain", "Reduced mobility"],
+      date: new Date().toISOString().split("T")[0],
+      timestamp: Date.now(),
+      bmi: 26.3,
+      sharingStatus: "shared",
+      sharingConsentGivenAt: Date.now(),
+      consultationStatus: "requested",
+      doctorReviewStatus: "awaiting-review",
+      doctorReviewedAt: null,
+      doctorReviewerName: null,
+      doctorInternalNotes: null,
+      doctorPatientFeedback: null,
+      doctorFollowUpRecommendation: null,
+      doctorAppointmentDetails: null,
+    };
+    onUpdateScreening(demoPatient);
+    onSelectPatient(demoPatient.id);
+  };
+
+  return (
+    <div className="xray-review-container" style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+      {/* 1. Patient Selector & Verification Bar */}
+      <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "10px", padding: "12px 16px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+            <Users size={18} style={{ color: "#0f766e" }} />
+            <strong style={{ fontSize: "9px", color: "#1e293b" }}>Patient Record:</strong>
+            {allScreenings.length > 0 ? (
+              <select
+                className="doctor-select"
+                style={{ padding: "5px 10px", fontSize: "8px", width: "auto", minWidth: "240px" }}
+                value={selectedRecord?.id || ""}
+                onChange={(e) => onSelectPatient(e.target.value)}
+              >
+                {allScreenings.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({s.id}) · {s.joint} · {s.band} {s.xrayReview ? "· [Reviewed]" : ""}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span style={{ fontSize: "8px", color: "#64748b" }}>No patients available</span>
+            )}
+          </div>
+          <button
+            type="button"
+            className="button button-secondary"
+            style={{ fontSize: "7.5px", padding: "5px 10px" }}
+            onClick={handleLoadDemoPatient}
+          >
+            <Plus size={13} /> Load Demo X-Ray Patient
+          </button>
+        </div>
+
+        {selectedRecord && (
+          <div style={{ display: "flex", gap: "16px", marginTop: "10px", paddingTop: "8px", borderTop: "1px solid #edf2f7", fontSize: "7.5px", color: "#475569" }}>
+            <span>Age / Sex: <strong>{selectedRecord.age}y</strong></span>
+            <span>District: <strong>{selectedRecord.district}</strong></span>
+            <span>Intake Joint: <strong>{selectedRecord.joint}</strong></span>
+            <span>Symptom Risk: <strong>{selectedRecord.band}</strong></span>
+            <span>
+              Sharing Status:{" "}
+              <strong style={{ color: selectedRecord.sharingStatus === "shared" ? "#16a34a" : "#ca8a04" }}>
+                {selectedRecord.sharingStatus === "shared" ? "Authorized / Shared" : "Private / Unshared"}
+              </strong>
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* 2. Clinician Authorization & Consent Checkbox */}
+      <div className="xray-consent-banner">
+        <label style={{ display: "flex", alignItems: "flex-start", gap: "10px", cursor: "pointer", fontSize: "8px", color: "#166534" }}>
+          <input
+            type="checkbox"
+            checked={consentConfirmed}
+            onChange={(e) => setConsentConfirmed(e.target.checked)}
+            style={{ marginTop: "2px", width: "16px", height: "16px", accentColor: "#16a34a" }}
+          />
+          <div>
+            <strong>Clinician Imaging Authorization &amp; Patient Consent Verified</strong>
+            <p style={{ margin: "2px 0 0", fontSize: "7.5px", color: "#15803d" }}>
+              I confirm clinician authorization to access this patient's radiograph and verify patient consent has been obtained for AI-assisted image analysis under institutional clinical governance.
+            </p>
+          </div>
+        </label>
+      </div>
+
+      {/* 3. Setup Grid: Anatomical Region, Laterality & View Selection */}
+      <div className="xray-setup-grid">
+        {/* Anatomical Region */}
+        <div className="doctor-form-group">
+          <label style={{ fontSize: "7.5px", textTransform: "uppercase", fontWeight: 700, color: "#475569" }}>
+            Anatomical Region
+          </label>
+          <input
+            className="doctor-input"
+            value="Knee Joint (Weight-Bearing Radiograph)"
+            disabled
+            style={{ background: "#f1f5f9", cursor: "not-allowed" }}
+          />
+        </div>
+
+        {/* Laterality */}
+        <div className="doctor-form-group">
+          <label style={{ fontSize: "7.5px", textTransform: "uppercase", fontWeight: 700, color: "#475569" }}>
+            Laterality
+          </label>
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button
+              type="button"
+              className={`button ${laterality === "Right" ? "button-primary" : "button-secondary"}`}
+              style={{ flex: 1, padding: "6px 10px", fontSize: "8px" }}
+              onClick={() => setLaterality("Right")}
+            >
+              Right Knee
+            </button>
+            <button
+              type="button"
+              className={`button ${laterality === "Left" ? "button-primary" : "button-secondary"}`}
+              style={{ flex: 1, padding: "6px 10px", fontSize: "8px" }}
+              onClick={() => setLaterality("Left")}
+            >
+              Left Knee
+            </button>
+          </div>
+        </div>
+
+        {/* Radiographic View */}
+        <div className="doctor-form-group">
+          <label htmlFor="xray-view-select" style={{ fontSize: "7.5px", textTransform: "uppercase", fontWeight: 700, color: "#475569" }}>
+            Radiographic Projection / View
+          </label>
+          <select
+            id="xray-view-select"
+            className="doctor-select"
+            value={xrayView}
+            onChange={(e) => setXrayView(e.target.value as XrayView)}
+          >
+            <option value="AP">AP (Anteroposterior Standing) - Standard</option>
+            <option value="PA">PA (Posteroanterior Rosenberg / Lyon-Schuss)</option>
+            <option value="Lateral">Lateral (Transverse View) - Model Abstention</option>
+            <option value="Other">Other / Skyline / Axial - Unsupported</option>
+          </select>
+        </div>
+      </div>
+
+      {/* View Warning if unsupported */}
+      {!viewSuitability.isSupported && (
+        <div className="alert-box alert-warning" style={{ background: "#fffbeb", border: "1px solid #fde68a", padding: "10px 14px", borderRadius: "8px" }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+            <AlertTriangle size={16} style={{ color: "#d97706", marginTop: "2px" }} />
+            <div>
+              <strong style={{ color: "#b45309", fontSize: "8.5px" }}>Unsupported Radiographic Projection for Automated KL Grading:</strong>
+              <p style={{ margin: "2px 0 0", fontSize: "7.5px", color: "#92400e" }}>
+                {viewSuitability.guidance} The model will abstain from automated KL grading to maintain clinical safety.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 4. Radiograph Ingestion & Workspace */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+        {/* Left Column: Image Input & Preview */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          {/* Synthetic Demo Benchmark Fixture Dropdown */}
+          <div style={{ background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: "8px", padding: "10px 12px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "6px", color: "#0369a1", fontSize: "8px", fontWeight: 700 }}>
+              <Layers size={14} />
+              <span>Synthetic Demo Mode · Benchmark Radiographs</span>
+            </div>
+            <select
+              className="doctor-select"
+              value={selectedFixtureId}
+              onChange={(e) => handleSelectFixture(e.target.value)}
+              style={{ fontSize: "8px" }}
+            >
+              <option value="none">-- Select Benchmark Radiograph (Demo Fixture) --</option>
+              {BENCHMARK_XRAY_FIXTURES.map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.name} ({f.laterality} · {f.view})
+                </option>
+              ))}
+            </select>
+            <div style={{ fontSize: "7px", color: "#0284c7", marginTop: "4px" }}>
+              Pre-validated synthetic SVG radiograph fixtures for presentation and offline demonstration without requiring local DICOM files.
+            </div>
+          </div>
+
+          {/* File Upload Dropzone */}
+          <div
+            className={`xray-dropzone ${isDragOver ? "dragover" : ""}`}
+            style={{ opacity: consentConfirmed ? 1 : 0.6, cursor: consentConfirmed ? "pointer" : "not-allowed" }}
+            onClick={() => consentConfirmed && fileInputRef.current?.click()}
+            onDragOver={(e) => {
+              e.preventDefault();
+              if (consentConfirmed) setIsDragOver(true);
+            }}
+            onDragLeave={() => setIsDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDragOver(false);
+              if (consentConfirmed && e.dataTransfer.files?.[0]) {
+                handleFileUpload(e.dataTransfer.files[0]);
+              }
+            }}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                if (e.target.files?.[0]) {
+                  handleFileUpload(e.target.files[0]);
+                }
+              }}
+              disabled={!consentConfirmed}
+            />
+            <Upload size={24} style={{ color: "#0f766e", margin: "0 auto 6px" }} />
+            <strong style={{ fontSize: "8.5px", color: "#1e293b" }}>Click or drag Knee X-Ray Radiograph here</strong>
+            <p style={{ margin: "2px 0 0", fontSize: "7.5px", color: "#64748b" }}>
+              Supported: PNG, JPEG, WebP · Max 15 MB · Min 256×256 px
+            </p>
+          </div>
+
+          {fileError && (
+            <div style={{ background: "#fef2f2", border: "1px solid #fecaca", padding: "8px 12px", borderRadius: "6px", color: "#b91c1c", fontSize: "7.5px" }}>
+              <strong>Upload Error:</strong> {fileError}
+            </div>
+          )}
+
+          {/* Radiograph Viewer / Preview */}
+          {imageSrc ? (
+            <div className="xray-viewer-panel">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                  <FileImage size={15} style={{ color: "#0f766e" }} />
+                  <strong style={{ fontSize: "8px", color: "#1e293b" }}>Radiograph Viewer:</strong>
+                  {fileMeta?.isDemo && (
+                    <span style={{ background: "#e0f2fe", color: "#0369a1", fontSize: "6.5px", padding: "2px 5px", borderRadius: "3px", fontWeight: 700 }}>
+                      SYNTHETIC DEMO
+                    </span>
+                  )}
+                </div>
+                {fileMeta?.dimensions && (
+                  <span style={{ fontSize: "7px", color: "#64748b" }}>{fileMeta.dimensions}</span>
+                )}
+              </div>
+
+              <div className="xray-image-frame">
+                <img
+                  src={imageSrc}
+                  alt={`Radiograph of ${laterality} knee (${xrayView} view)`}
+                  style={{ width: "100%", height: "260px", objectFit: "contain", borderRadius: "4px" }}
+                />
+                <div className="xray-laterality-tag">
+                  [{laterality.charAt(0)}] {laterality.toUpperCase()} KNEE · {xrayView} PROJECTION
+                </div>
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "10px" }}>
+                <span style={{ fontSize: "7.5px", color: "#64748b" }}>
+                  File: <strong>{fileMeta?.name || "xray_image"}</strong>
+                </span>
+                <button
+                  type="button"
+                  className="button button-primary"
+                  onClick={handleRunAnalysis}
+                  disabled={isAnalyzing || !consentConfirmed}
+                  style={{ fontSize: "8px", padding: "6px 14px" }}
+                >
+                  {isAnalyzing ? (
+                    <>
+                      <RefreshCw size={13} className="spin" /> Analyzing Radiograph...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles size={13} /> Run AI-Assisted Radiograph Analysis
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div style={{ border: "1px dashed #cbd5e1", borderRadius: "8px", height: "200px", display: "grid", placeItems: "center", color: "#94a3b8", fontSize: "8px" }}>
+              <span>No radiograph loaded. Please upload an image or choose a demo fixture above.</span>
+            </div>
+          )}
+        </div>
+
+        {/* Right Column: AI Analysis Output Card */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          {analysisError && (
+            <div style={{ background: "#fef2f2", border: "1px solid #fecaca", padding: "10px 14px", borderRadius: "8px", color: "#b91c1c", fontSize: "8px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}>
+                <AlertCircle size={15} />
+                <strong>Inference Notice:</strong>
+              </div>
+              <p style={{ margin: 0 }}>{analysisError}</p>
+            </div>
+          )}
+
+          {analysisOutput ? (
+            <div style={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: "10px", padding: "14px", display: "flex", flexDirection: "column", gap: "10px" }}>
+              {/* Header Badge */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{
+                  fontSize: "7.5px",
+                  fontWeight: 700,
+                  textTransform: "uppercase",
+                  padding: "3px 8px",
+                  borderRadius: "4px",
+                  background: analysisOutput.abstained ? "#fef3c7" : "#ecfdf5",
+                  color: analysisOutput.abstained ? "#92400e" : "#065f46"
+                }}>
+                  {analysisOutput.abstained
+                    ? "Model Abstained — Manual Clinician Review Required"
+                    : "AI-Assisted Preliminary Finding — Clinician Review Required"}
+                </span>
+                <span style={{ fontSize: "7px", color: "#64748b" }}>
+                  {new Date(analysisOutput.timestamp || Date.now()).toLocaleTimeString()}
+                </span>
+              </div>
+
+              {/* Abstention State Display */}
+              {analysisOutput.abstained ? (
+                <div style={{ background: "#fffbeb", border: "1px solid #fde68a", padding: "10px 12px", borderRadius: "8px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px", color: "#b45309", fontWeight: 700, fontSize: "8.5px" }}>
+                    <AlertTriangle size={15} />
+                    <span>Unable to provide a reliable model output — manual review required.</span>
+                  </div>
+                  <p style={{ margin: "4px 0 0", fontSize: "7.5px", color: "#92400e", lineHeight: "1.4" }}>
+                    {analysisOutput.abstentionReason}
+                  </p>
+                  <p style={{ margin: "6px 0 0", fontSize: "7px", color: "#78350f", fontStyle: "italic" }}>
+                    Clinical Safety Boundary: The automated model is evaluated strictly on standing weight-bearing AP or PA knee projections. It does not infer KL scores from lateral projections or non-knee anatomy to avoid false clinical guidance.
+                  </p>
+                </div>
+              ) : (
+                /* Successful Analysis Output */
+                <div>
+                  {/* Predicted Grade Card */}
+                  <div style={{ display: "flex", alignItems: "center", gap: "14px", background: "#f8fafc", padding: "12px", borderRadius: "8px", border: "1px solid #edf2f7" }}>
+                    <div style={{
+                      width: "56px",
+                      height: "56px",
+                      borderRadius: "10px",
+                      background: analysisOutput.predictedKlGrade === 0
+                        ? "#10b981"
+                        : analysisOutput.predictedKlGrade === 1
+                          ? "#06b6d4"
+                          : analysisOutput.predictedKlGrade === 2
+                            ? "#eab308"
+                            : analysisOutput.predictedKlGrade === 3
+                              ? "#f97316"
+                              : "#ef4444",
+                      color: "#ffffff",
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontWeight: 800,
+                    }}>
+                      <span style={{ fontSize: "7px", textTransform: "uppercase", opacity: 0.85 }}>KL Grade</span>
+                      <span style={{ fontSize: "20px", lineHeight: "1" }}>{analysisOutput.predictedKlGrade ?? "—"}</span>
+                    </div>
+
+                    <div style={{ flex: 1 }}>
+                      <strong style={{ fontSize: "10px", color: "#1e293b" }}>
+                        {analysisOutput.predictedKlGrade !== undefined && analysisOutput.predictedKlGrade !== null
+                          ? KL_GRADE_DESCRIPTIONS[analysisOutput.predictedKlGrade]?.label
+                          : "Non-Graded"}
+                      </strong>
+                      <p style={{ margin: "2px 0 0", fontSize: "7.5px", color: "#475569" }}>
+                        {analysisOutput.primaryFinding || analysisOutput.predictedKlLabel || "Analysis completed"}
+                      </p>
+                      <div style={{ display: "flex", gap: "12px", marginTop: "4px", fontSize: "7px", color: "#64748b" }}>
+                        <span>Confidence: <strong>{Math.round((analysisOutput.confidence ?? analysisOutput.modelConfidence ?? 0) * 100)}%</strong></span>
+                        <span>Model Uncertainty: <strong>{Math.round((analysisOutput.uncertaintyScore ?? 0) * 100)}%</strong></span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Class Probability Distribution */}
+                  <div style={{ marginTop: "12px" }}>
+                    <span style={{ fontSize: "7.5px", textTransform: "uppercase", fontWeight: 700, color: "#64748b" }}>
+                      Kellgren-Lawrence Class Probability Distribution:
+                    </span>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "5px", marginTop: "6px" }}>
+                      {(["kl0", "kl1", "kl2", "kl3", "kl4"] as const).map((key, idx) => {
+                        const prob = (analysisOutput.classProbabilities && analysisOutput.classProbabilities[key]) || 0;
+                        const pct = Math.round(prob * 100);
+                        const isPredicted = analysisOutput.predictedKlGrade === idx;
+                        const color = idx === 0 ? "#10b981" : idx === 1 ? "#06b6d4" : idx === 2 ? "#eab308" : idx === 3 ? "#f97316" : "#ef4444";
+                        return (
+                          <div key={key} style={{ display: "grid", gridTemplateColumns: "70px 1fr 35px", alignItems: "center", gap: "8px", fontSize: "7.5px" }}>
+                            <span style={{ fontWeight: isPredicted ? 700 : 500, color: isPredicted ? "#0f172a" : "#64748b" }}>
+                              KL-{idx} {isPredicted ? "★" : ""}
+                            </span>
+                            <div className="xray-prob-bar-track">
+                              <div className="xray-prob-bar-fill" style={{ width: `${pct}%`, background: color }} />
+                            </div>
+                            <span style={{ textAlign: "right", fontWeight: 600, color: "#475569" }}>{pct}%</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div style={{ fontSize: "7px", color: "#64748b", marginTop: "4px", fontStyle: "italic" }}>
+                      * Algorithmic model class scores reflect neural network softmax output across weight-bearing knee cohorts, NOT calibrated clinical diagnostic probabilities. Independent clinician review required.
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Quality & Limitations */}
+              {analysisOutput.qualityWarnings && analysisOutput.qualityWarnings.length > 0 && (
+                <div style={{ background: "#f8fafc", padding: "8px", borderRadius: "6px", fontSize: "7.5px", color: "#475569" }}>
+                  <strong>Image Quality Check:</strong> {analysisOutput.qualityWarnings.join(" · ")}
+                </div>
+              )}
+
+              {/* Model Provenance Box */}
+              <div className="xray-provenance-box">
+                <div style={{ fontWeight: 700, color: "#334155", marginBottom: "3px" }}>
+                  Model Provenance &amp; Regulatory Safety Scope:
+                </div>
+                <div>Model: <strong>{analysisOutput.modelName}</strong> (Version {analysisOutput.modelVersion})</div>
+                <div>Provider / Engine: {analysisOutput.provider}</div>
+                <div>Training / Benchmark Cohort: {analysisOutput.evaluationDataset || "Digital Knee X-ray Images (Kaggle / OAI Reference Labels) · License: MIT"}</div>
+                <div style={{ marginTop: "4px", color: "#94a3b8" }}>
+                  Regulatory Disclaimer: Investigational decision-support aid for clinical workflow demonstration. Not cleared by FDA/CDSCO as a primary standalone diagnostic medical device.
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div style={{ border: "1px dashed #cbd5e1", borderRadius: "8px", height: "200px", display: "grid", placeItems: "center", color: "#94a3b8", fontSize: "8px" }}>
+              <span>Upload radiograph and click "Run AI-Assisted Radiograph Analysis" to view model findings.</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 5. Doctor Independent Review & Final Interpretation Form */}
+      <div style={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: "10px", padding: "16px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px", borderBottom: "1px solid #edf2f7", paddingBottom: "8px" }}>
+          <div>
+            <strong style={{ fontSize: "10px", color: "#1e293b" }}>Clinician Radiographic Assessment &amp; Final Interpretation</strong>
+            <p style={{ margin: "2px 0 0", fontSize: "7.5px", color: "#64748b" }}>
+              Independent clinician evaluation. AI findings are preliminary decision support and must never automatically overwrite clinician judgement.
+            </p>
+          </div>
+          <span style={{ fontSize: "7.5px", background: "#f1f5f9", padding: "3px 8px", borderRadius: "4px", color: "#475569", fontWeight: 600 }}>
+            Status: {selectedRecord?.xrayReview?.reviewStatus === "finalized" ? "Clinically Finalized" : "Draft Review"}
+          </span>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "14px" }}>
+          {/* Clinician Reviewer Name */}
+          <div className="doctor-form-group">
+            <label htmlFor="clinician-name" style={{ fontSize: "7.5px", textTransform: "uppercase", fontWeight: 700, color: "#475569" }}>
+              Reviewing Clinician Name &amp; Designation <b>*</b>
+            </label>
+            <input
+              id="clinician-name"
+              className="doctor-input"
+              value={reviewerName}
+              onChange={(e) => setReviewerName(e.target.value)}
+              placeholder="e.g. Dr. A. Sharma, MO (Community Health)"
+            />
+          </div>
+
+          {/* Clinician Confirmed KL Grade */}
+          <div className="doctor-form-group">
+            <label htmlFor="confirmed-kl-grade" style={{ fontSize: "7.5px", textTransform: "uppercase", fontWeight: 700, color: "#475569" }}>
+              Clinician Confirmed Kellgren-Lawrence (KL) Grade <b>*</b>
+            </label>
+            <select
+              id="confirmed-kl-grade"
+              className="doctor-select"
+              value={confirmedKlGrade}
+              onChange={(e) => {
+                const val = e.target.value;
+                setConfirmedKlGrade(val === "indeterminate" ? "indeterminate" : (parseInt(val, 10) as KLGrade));
+              }}
+            >
+              <option value="indeterminate">-- Select Confirmed Grade --</option>
+              <option value="0">KL Grade 0: Normal (No OA features)</option>
+              <option value="1">KL Grade 1: Doubtful (Possible osteophytic lipping)</option>
+              <option value="2">KL Grade 2: Mild (Definite osteophytes, possible JSN)</option>
+              <option value="3">KL Grade 3: Moderate (Multiple osteophytes, definite JSN, sclerosis)</option>
+              <option value="4">KL Grade 4: Severe (Large osteophytes, marked JSN, bone deformity)</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Independent Feature Checklist */}
+        <div style={{ marginTop: "12px", background: "#f8fafc", padding: "10px 12px", borderRadius: "8px", border: "1px solid #edf2f7" }}>
+          <span style={{ fontSize: "7.5px", textTransform: "uppercase", fontWeight: 700, color: "#475569", display: "block", marginBottom: "8px" }}>
+            Clinician Radiographic Feature Checklist:
+          </span>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: "10px", fontSize: "7.5px" }}>
+            <div>
+              <label htmlFor="jsn-select" style={{ display: "block", color: "#64748b", marginBottom: "3px" }}>Joint Space Narrowing</label>
+              <select
+                id="jsn-select"
+                className="doctor-select"
+                value={jointSpaceNarrowing}
+                onChange={(e) => setJointSpaceNarrowing(e.target.value as any)}
+                style={{ fontSize: "7.5px" }}
+              >
+                <option value="none">None</option>
+                <option value="mild">Mild (Medial/Lateral)</option>
+                <option value="moderate">Moderate</option>
+                <option value="severe">Severe / Bone-on-Bone</option>
+              </select>
+            </div>
+
+            <div>
+              <label htmlFor="osteo-select" style={{ display: "block", color: "#64748b", marginBottom: "3px" }}>Osteophyte Formation</label>
+              <select
+                id="osteo-select"
+                className="doctor-select"
+                value={osteophytes}
+                onChange={(e) => setOsteophytes(e.target.value as any)}
+                style={{ fontSize: "7.5px" }}
+              >
+                <option value="none">None</option>
+                <option value="doubtful">Doubtful</option>
+                <option value="definite">Definite marginal</option>
+                <option value="large">Large / Multi-compartment</option>
+              </select>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", marginTop: "16px" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={subchondralSclerosis}
+                  onChange={(e) => setSubchondralSclerosis(e.target.checked)}
+                />
+                <span>Subchondral Sclerosis</span>
+              </label>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", marginTop: "16px" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={boneDeformityOrCysts}
+                  onChange={(e) => setBoneDeformityOrCysts(e.target.checked)}
+                />
+                <span>Cysts / Deformity</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        {/* Traceable Clinician Override Detection */}
+        {analysisOutput &&
+          analysisOutput.predictedKlGrade !== null &&
+          confirmedKlGrade !== "indeterminate" &&
+          confirmedKlGrade !== analysisOutput.predictedKlGrade && (
+            <div style={{ background: "#fffbeb", border: "1px solid #fde68a", padding: "10px 14px", borderRadius: "8px", margin: "12px 0" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", color: "#b45309", fontWeight: 700, fontSize: "8.5px" }}>
+                <AlertTriangle size={15} />
+                <span>
+                  Clinician Override Flagged: AI suggested KL-{analysisOutput.predictedKlGrade}, but you confirmed KL-{confirmedKlGrade}.
+                </span>
+              </div>
+              <label htmlFor="override-reason" style={{ display: "block", fontSize: "7.5px", fontWeight: 600, color: "#92400e", marginTop: "6px" }}>
+                Clinical Rationale for Overriding AI Output <b>*</b>
+              </label>
+              <textarea
+                id="override-reason"
+                className="doctor-textarea"
+                style={{ fontSize: "8px", minHeight: "50px", marginTop: "4px" }}
+                placeholder="e.g. Definite marginal osteophyte on medial tibial plateau warrants KL-2 despite marginal joint space preservation on gradient profile."
+                value={clinicianOverrideReason}
+                onChange={(e) => setClinicianOverrideReason(e.target.value)}
+                required
+              />
+              <small style={{ color: "#b45309", fontSize: "7px" }}>
+                * Mandatory for legal and clinical audit trail: Document reason for clinical discrepancy between model heuristic and clinician confirmation.
+              </small>
+            </div>
+          )}
+
+        {/* Diagnostic Impression & Narrative */}
+        <div className="doctor-form-group" style={{ marginTop: "12px" }}>
+          <label htmlFor="clinician-impression" style={{ fontSize: "7.5px", textTransform: "uppercase", fontWeight: 700, color: "#475569" }}>
+            Clinician Radiographic Impression &amp; Joint Space Narrative
+          </label>
+          <textarea
+            id="clinician-impression"
+            className="doctor-textarea"
+            style={{ fontSize: "8px", minHeight: "55px" }}
+            placeholder="e.g. Radiograph confirms medial joint space narrowing and definite tibial spine osteophytes consistent with mild-to-moderate knee OA. No acute fractures or severe subchondral erosion observed."
+            value={clinicianImpression}
+            onChange={(e) => setClinicianImpression(e.target.value)}
+          />
+        </div>
+
+        {/* Clinical Recommendation Selector */}
+        <div className="doctor-form-group" style={{ marginTop: "10px" }}>
+          <label htmlFor="clinician-recommendation" style={{ fontSize: "7.5px", textTransform: "uppercase", fontWeight: 700, color: "#475569" }}>
+            Imaging-Guided Recommendation
+          </label>
+          <select
+            id="clinician-recommendation"
+            className="doctor-select"
+            value={recommendation}
+            onChange={(e) => setRecommendation(e.target.value)}
+          >
+            <option value="Routine monitoring & joint protection">Routine monitoring &amp; joint protection</option>
+            <option value="Physical therapy & quadriceps strengthening exercises">Physical therapy &amp; quadriceps strengthening exercises</option>
+            <option value="Orthopaedic specialist referral for joint preservation">Orthopaedic specialist referral for joint preservation</option>
+            <option value="Advanced imaging (MRI / CT) for meniscal / soft-tissue evaluation">Advanced imaging (MRI / CT) for meniscal / soft-tissue evaluation</option>
+            <option value="Joint aspiration or diagnostic workup for secondary inflammation">Joint aspiration or diagnostic workup for secondary inflammation</option>
+          </select>
+        </div>
+
+        {/* Save Status Banner */}
+        {saveMessage && (
+          <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", padding: "8px 12px", borderRadius: "6px", color: "#166534", fontSize: "8px", marginTop: "10px" }}>
+            <CheckCircle2 size={15} style={{ verticalAlign: "middle", marginRight: "4px" }} />
+            {saveMessage}
+          </div>
+        )}
+
+        {/* Form Action Buttons */}
+        <div style={{ display: "flex", gap: "10px", marginTop: "16px", alignItems: "center", flexWrap: "wrap" }}>
+          <button
+            type="button"
+            className="button button-primary"
+            onClick={handleSaveReview}
+            disabled={isSaving || !selectedRecord}
+          >
+            <CheckCircle2 size={16} /> Save &amp; Finalize X-Ray Review
+          </button>
+          {selectedRecord && (
+            <button
+              type="button"
+              className="button button-secondary"
+              onClick={() => onViewReport(selectedRecord)}
+            >
+              <Printer size={15} /> Preview Medical Report
+            </button>
+          )}
+          <button
+            type="button"
+            className="button button-secondary"
+            onClick={() => setShowAuditTrail(!showAuditTrail)}
+            style={{ marginLeft: "auto" }}
+          >
+            <Clock3 size={15} /> {showAuditTrail ? "Hide Audit Log" : "View Audit Trail"} ({auditEntries.length})
+          </button>
+        </div>
+
+        {/* 6. Expandable Audit Trail Viewer */}
+        {showAuditTrail && (
+          <div style={{ marginTop: "14px", paddingTop: "12px", borderTop: "1px solid #edf2f7" }}>
+            <strong style={{ fontSize: "8px", color: "#334155", display: "block", marginBottom: "6px" }}>
+              X-Ray Review Clinical Audit Log:
+            </strong>
+            {auditEntries.length === 0 ? (
+              <span style={{ fontSize: "7.5px", color: "#94a3b8" }}>No audit events logged yet.</span>
+            ) : (
+              <div className="xray-audit-list">
+                {auditEntries.map((entry, idx) => (
+                  <div key={entry.id || entry.eventId || idx} className="xray-audit-item">
+                    <div>
+                      <strong style={{ color: "#0f766e" }}>{entry.action || entry.eventType}</strong>
+                      <div style={{ color: "#334155" }}>
+                        {typeof entry.details === "string" ? entry.details : JSON.stringify(entry.details)}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: "right", color: "#64748b", whiteSpace: "nowrap" }}>
+                      <div>{entry.actor || entry.doctorId}</div>
+                      <div>{new Date(entry.timestamp).toLocaleTimeString()}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+});
+
 const DoctorPortalPage = memo(function DoctorPortalPage({
   screenings,
   onUpdateScreening,
@@ -4929,6 +6319,7 @@ const DoctorPortalPage = memo(function DoctorPortalPage({
     return screenings.filter((s) => s.sharingStatus === "shared");
   }, [screenings]);
 
+  const [activeDoctorTab, setActiveDoctorTab] = useState<"triage" | "xray">("triage");
   const [filter, setFilter] = useState<"all" | "awaiting" | "consultation">("all");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(() => {
@@ -5092,8 +6483,52 @@ const DoctorPortalPage = memo(function DoctorPortalPage({
         </div>
       </div>
 
-      {/* Main Review Layout */}
-      {authorizedScreenings.length === 0 ? (
+      {/* Doctor Sub-Tabs */}
+      <div className="doctor-view-tabs" role="tablist" style={{ marginBottom: "16px" }}>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeDoctorTab === "triage"}
+          className={`doctor-tab-btn ${activeDoctorTab === "triage" ? "active" : ""}`}
+          onClick={() => setActiveDoctorTab("triage")}
+        >
+          <ClipboardCheck size={16} /> Clinical Triage &amp; Intake Notes
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeDoctorTab === "xray"}
+          className={`doctor-tab-btn ${activeDoctorTab === "xray" ? "active" : ""}`}
+          onClick={() => setActiveDoctorTab("xray")}
+        >
+          <Activity size={16} /> X-ray AI Review
+          {selectedRecord?.xrayReview && (
+            <span
+              style={{
+                marginLeft: "6px",
+                padding: "2px 6px",
+                borderRadius: "4px",
+                fontSize: "7px",
+                background: selectedRecord.xrayReview.reviewStatus === "finalized" ? "#dcfce7" : "#e0f2fe",
+                color: selectedRecord.xrayReview.reviewStatus === "finalized" ? "#15803d" : "#0369a1",
+                fontWeight: 700,
+              }}
+            >
+              KL-{selectedRecord.xrayReview.clinicianConfirmedKlGrade ?? selectedRecord.xrayReview.aiOutput?.predictedKlGrade ?? selectedRecord.xrayReview.aiAnalysis?.predictedKlGrade ?? "Done"}
+            </span>
+          )}
+        </button>
+      </div>
+
+      {activeDoctorTab === "xray" ? (
+        <DoctorXrayReviewPanel
+          selectedRecord={selectedRecord}
+          allScreenings={screenings}
+          onSelectPatient={(id) => setSelectedId(id)}
+          onUpdateScreening={onUpdateScreening}
+          onViewReport={onViewReport}
+        />
+      ) : authorizedScreenings.length === 0 ? (
         <div className="empty-state records-empty">
           <div className="empty-icon" style={{ background: "#e0f2fe", color: "#0284c7" }}>
             <Lock size={24} />

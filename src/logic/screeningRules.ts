@@ -52,6 +52,7 @@ import type {
   StructuredGaitAnalysisOutput,
   ManualGaitObservations,
 } from "../services/gaitAnalysisService";
+import type { XrayDoctorReview } from "./xrayModels";
 
 export interface Screening {
   id: string;
@@ -94,6 +95,8 @@ export interface Screening {
   bmdTScore?: string;
   bmdSite?: string;
   bmdDate?: string;
+  // Doctor-only X-ray Radiograph Review
+  xrayReview?: XrayDoctorReview;
 }
 
 export const districts = [
@@ -362,6 +365,9 @@ export function exportRecordsToCsv(records: Screening[]): string {
     "Doctor Review Status",
     "Doctor Follow-Up Recommendation",
     "Urgent Safety Guidance",
+    "X-ray Review Status",
+    "X-ray Predicted KL Grade",
+    "X-ray Clinician Confirmed KL",
   ];
 
   const lines = [headers.map(escapeCsvField).join(",")];
@@ -377,6 +383,15 @@ export function exportRecordsToCsv(records: Screening[]): string {
       record.gaitAssessment && record.gaitAssessment.status === "completed"
         ? `Cadence: ${record.gaitAssessment.features.cadence?.value ?? "N/A"} steps/min | Symmetry: ${record.gaitAssessment.features.stepSymmetry?.value ?? "N/A"} | Flexion ROM: ${record.gaitAssessment.features.activeKneeFlexionRange?.value ?? "N/A"} deg`
         : "None";
+
+    const xrayStatus = record.xrayReview ? record.xrayReview.reviewStatus : "Not performed";
+    const predGrade = record.xrayReview?.aiOutput?.predictedKlGrade ?? record.xrayReview?.aiAnalysis?.predictedKlGrade;
+    const xrayPredictedKl = predGrade !== undefined ? `KL-${predGrade}` : "N/A";
+    const confGrade = record.xrayReview?.clinicianConfirmedKlGrade;
+    const xrayConfirmedKl =
+      confGrade !== undefined && confGrade !== "unassigned" && confGrade !== null
+        ? `KL-${confGrade}`
+        : "Pending clinician confirmation";
 
     const row = [
       record.id,
@@ -406,6 +421,9 @@ export function exportRecordsToCsv(records: Screening[]): string {
       record.doctorReviewStatus || "awaiting-review",
       record.doctorFollowUpRecommendation || "None recorded",
       record.urgentCareNotice?.hasRedFlags ? record.urgentCareNotice.flags.join(" | ") : "Standard precautions",
+      xrayStatus,
+      xrayPredictedKl,
+      xrayConfirmedKl,
     ];
     lines.push(row.map(escapeCsvField).join(","));
   }
@@ -973,6 +991,7 @@ export function loadStoredScreenings(): Screening[] {
           bmdTScore: typeof record.bmdTScore === "string" ? record.bmdTScore : undefined,
           bmdSite: typeof record.bmdSite === "string" ? record.bmdSite : undefined,
           bmdDate: typeof record.bmdDate === "string" ? record.bmdDate : undefined,
+          xrayReview: record.xrayReview,
         };
       });
     }

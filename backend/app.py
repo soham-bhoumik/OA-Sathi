@@ -25,6 +25,12 @@ from backend.gait_pipeline import (
     GaitPipeline,
     PipelineResult,
 )
+from backend.xray_pipeline import (
+    KneeXrayPipeline,
+    MODEL_METADATA as XRAY_MODEL_METADATA,
+    record_xray_audit_event,
+    get_xray_audit_trail,
+)
 
 app = FastAPI(
     title="OA-Sathi Gait Analysis Service",
@@ -216,7 +222,184 @@ def get_sample_benchmark_analysis(recordId: Optional[str] = "OS-SAMPLE"):
     }
 
 
+# ============================================================================
+# KNEE X-RAY RADIOGRAPH ANALYSIS MODULE (DOCTOR PORTAL)
+# ============================================================================
+
+_xray_pipeline_instance: Optional[KneeXrayPipeline] = None
+
+
+def get_xray_pipeline() -> KneeXrayPipeline:
+    global _xray_pipeline_instance
+    if _xray_pipeline_instance is None:
+        _xray_pipeline_instance = KneeXrayPipeline()
+    return _xray_pipeline_instance
+
+
+@app.get("/api/xray/model-info")
+def get_xray_model_info():
+    """Returns technical metadata, provenance, and validation constraints for the Knee OA model."""
+    pipe = get_xray_pipeline()
+    return {
+        "status": "ok",
+        "ready": pipe.is_ready(),
+        "genuineModelLoaded": pipe.has_genuine_model(),
+        "engine": "onnxruntime-densenet121" if pipe.has_genuine_model() else "edge-gradient-reference",
+        **XRAY_MODEL_METADATA,
+    }
+
+
+@app.get("/api/xray/health")
+def get_xray_health():
+    """Health check endpoint for the X-ray radiograph analysis subsystem."""
+    pipe = get_xray_pipeline()
+    is_ready = pipe is not None and pipe.is_ready()
+    has_model = pipe is not None and pipe.has_genuine_model()
+    return {
+        "status": "ok" if is_ready else "degraded",
+        "service": "oa-sathi-xray-analysis",
+        "version": XRAY_MODEL_METADATA["modelVersion"],
+        "modelName": XRAY_MODEL_METADATA["modelName"],
+        "ready": is_ready,
+        "genuineModelLoaded": has_model,
+        "engine": "onnxruntime-densenet121" if has_model else "edge-gradient-reference",
+        "supportedViews": XRAY_MODEL_METADATA["supportedViews"],
+        "privacyNotice": "Local execution only. Zero external cloud image transmission.",
+    }
+
+
+@app.post("/api/xray/analyze")
+async def analyze_xray(
+    file: UploadFile = File(...),
+    patientId: str = Form(...),
+    laterality: str = Form("Right"),
+    view: str = Form("AP"),
+    doctorId: str = Form("Dr. A. Sharma, MO"),
+    consentConfirmed: bool = Form(True),
+):
+    """
+    Submits a knee radiograph image to the validated Kellgren-Lawrence grading pipeline.
+    Enforces format, dimensions, view validation, and uncertainty calibration.
+    """
+    if not file.filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing filename for uploaded X-ray image.",
+        )
+
+    # Read image bytes
+    image_bytes = await file.read()
+    content_type = file.content_type or "application/octet-stream"
+
+    pipe = get_xray_pipeline()
+    result = pipe.analyze_knee_radiograph(
+        image_bytes=image_bytes,
+        filename=file.filename,
+        content_type=content_type,
+        patient_id=patientId,
+        laterality=laterality,
+        view=view,
+        doctor_id=doctorId,
+        consent_confirmed=consentConfirmed,
+    )
+
+    if result.get("status") == "invalid-image":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=result.get("error", "Invalid radiograph file."),
+        )
+
+    return JSONResponse(content=result)
+
+
+@app.get("/api/xray/benchmark-fixtures")
+def get_xray_benchmark_fixtures():
+    """
+    Returns pre-configured synthetic / benchmark knee radiographs for
+    transparent clinical demonstration and testing without requiring local DICOM files.
+    """
+    return {
+        "status": "ok",
+        "fixtures": [
+            {
+                "id": "fixture_kl0_normal",
+                "label": "Benchmark 1: Normal Knee (KL Grade 0 · None)",
+                "description": "Preserved medial & lateral joint space; smooth subchondral bone contours; no osteophytes.",
+                "anatomicalSite": "Knee",
+                "laterality": "Right",
+                "view": "AP",
+                "simulatedKl": 0,
+                "simulatedConfidence": 0.88,
+                "filename": "benchmark_knee_normal_kl0.png",
+            },
+            {
+                "id": "fixture_kl2_mild",
+                "label": "Benchmark 2: Early Joint Space Narrowing (KL Grade 2 · Minimal/Mild)",
+                "description": "Definite early osteophytic spurs at medial tibial plateau; possible medial compartment narrowing.",
+                "anatomicalSite": "Knee",
+                "laterality": "Right",
+                "view": "AP",
+                "simulatedKl": 2,
+                "simulatedConfidence": 0.74,
+                "filename": "benchmark_knee_mild_kl2.png",
+            },
+            {
+                "id": "fixture_kl3_moderate",
+                "label": "Benchmark 3: Moderate OA with Sclerosis (KL Grade 3 · Moderate)",
+                "description": "Multiple moderate osteophytes; definite medial joint space narrowing; prominent subchondral sclerosis.",
+                "anatomicalSite": "Knee",
+                "laterality": "Left",
+                "view": "AP",
+                "simulatedKl": 3,
+                "simulatedConfidence": 0.81,
+                "filename": "benchmark_knee_moderate_kl3.png",
+            },
+            {
+                "id": "fixture_lateral_abstention",
+                "label": "Benchmark 4: Lateral Projection (Demonstrating Model Abstention)",
+                "description": "Standard lateral projection. Demonstrates transparent AI refusal when submitted non-weight-bearing/unsupported view.",
+                "anatomicalSite": "Knee",
+                "laterality": "Left",
+                "view": "Lateral",
+                "simulatedKl": None,
+                "simulatedConfidence": 0.0,
+                "filename": "benchmark_knee_lateral_abstain.png",
+            },
+        ],
+    }
+
+
+@app.get("/api/xray/audit-log")
+def get_audit_log(patientId: Optional[str] = None):
+    """Retrieves access, upload, analysis, and correction audit log entries."""
+    trail = get_xray_audit_trail(patientId)
+    return {
+        "status": "ok",
+        "patientId": patientId,
+        "entryCount": len(trail),
+        "entries": trail,
+    }
+
+
+@app.post("/api/xray/audit-log")
+def log_client_audit_event(
+    eventType: str = Form(...),
+    patientId: str = Form(...),
+    doctorId: str = Form("Dr. A. Sharma, MO"),
+    notes: Optional[str] = Form(None),
+):
+    """Allows client-side clinician actions (e.g. review finalized, correction made) to be recorded in the audit trail."""
+    event = record_xray_audit_event(
+        event_type=eventType,
+        patient_id=patientId,
+        doctor_id=doctorId,
+        details={"notes": notes or ""},
+    )
+    return {"status": "ok", "event": event}
+
+
 if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("backend.app:app", host="127.0.0.1", port=8000, reload=False)
+

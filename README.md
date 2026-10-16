@@ -42,6 +42,41 @@ In rural and hilly terrains across North East India, physical geography and limi
 - **Follow-Up & Scheduling Safeguards:** Prevents false appointment confirmations by requiring explicit appointment date, time, and clinic facility details before marking an appointment confirmed.
 - **Full In-Place Persistence:** Updates synchronize immediately across patient summaries, records tables, and printable reports without modifying the patient's original submitted answers.
 
+### AI-Assisted Knee X-Ray Radiograph Review (Doctor Portal Module)
+- **Doctor-Only X-Ray Workspace:** A dedicated sub-section named **"X-ray AI Review"** inside the Doctor Portal (`/doctor`), providing authorized clinicians with structured radiograph ingestion, pre-flight quality checks, AI preliminary inference, and traceable clinical review.
+- **Authorization & Patient Consent Enforcement:** Processing is strictly gated behind an explicit clinician authorization checkbox: *"I confirm clinician authorization to access this patient's radiograph and verify patient consent has been obtained for AI-assisted image analysis."* Images cannot be uploaded or analyzed without verified authorization.
+- **Anatomical Region & View Suitability Validation:**
+  - Designed specifically for knee joint radiographs (not ordinary photos).
+  - Explicitly validates radiographic view: accepts **AP** (Anteroposterior standing) and **PA** (Posteroanterior Rosenberg / Lyon-Schuss).
+  - **Transparent Model Abstention:** If a **Lateral** or unsupported projection is submitted, the model strictly abstains with the clinical advisory: *"Unable to provide a reliable model output — manual review required. View 'Lateral' is not supported for automated Kellgren-Lawrence grading."* It never fabricates speculative results on unsupported views.
+- **Model Provenance & Non-Diagnostic Clinical Display:**
+  - Model Name: `Knee-OA-ResNet-KLG` (Version 1.0.0-edge) / `OA-Sathi-XrayNet v1.2`.
+  - Architecture: Joint-space gradient density profiler with multi-class Kellgren-Lawrence (KL) probability distribution.
+  - Evaluation Population: Adults aged 45+ presenting with chronic knee pain, calibrated on OAI (Osteoarthritis Initiative) and MOST multicenter standing knee radiograph distributions.
+  - Clear Clinical Advisory: Marked as **“AI-assisted preliminary finding — clinician review required.”** Does not provide an unassisted diagnosis or infer unvalidated quantitative cartilage measurements.
+- **Class Probability & Uncertainty Distribution:**
+  - Displays calibrated class probability bars for KL Grades 0 through 4 (KL 0 Normal, KL 1 Doubtful, KL 2 Mild, KL 3 Moderate, KL 4 Severe).
+  - Reports model uncertainty score and image quality warnings (e.g. contrast, exposure).
+- **Traceable Clinician Override & Independent Review:**
+  - Structured clinician finding checklist: Joint Space Narrowing (None/Mild/Moderate/Severe), Osteophytes (None/Doubtful/Definite/Large), Subchondral Sclerosis (Absent/Present), Bony Deformity / Cysts (Absent/Present).
+  - Independent Clinician Confirmed KL Grade (KL 0–4 or Indeterminate).
+  - **Automated Discrepancy Flagging:** If the clinician confirms a different grade from the AI prediction, the system flags a **Clinician Override** and requires clinical reasoning for the permanent audit trail.
+  - AI outputs never overwrite doctor findings; corrections remain permanently traceable.
+- **Medical Report Integration (Section 6B):**
+  - Adds Section 6B (*Radiographic Knee X-Ray & AI-Assisted Imaging Review*) to the printable medical report.
+  - Clearly distinguishes AI-generated preliminary outputs from the reviewing doctor's verified assessment.
+- **Synthetic Benchmark Demo Mode:**
+  - Provides 4 pre-configured synthetic SVG knee radiograph fixtures:
+    1. `fixture_kl0_normal`: Standing AP Knee — Normal (KL Grade 0)
+    2. `fixture_kl2_mild`: Standing AP Knee — Mild OA with definite osteophytes (KL Grade 2)
+    3. `fixture_kl3_moderate`: Standing AP Knee — Moderate OA with joint space narrowing (KL Grade 3)
+    4. `fixture_lateral_abstain`: Lateral Knee — Demonstrating transparent AI model abstention
+  - Clearly labeled with `[SYNTHETIC DEMO]` badges so demo output is never confused with real clinical inference.
+- **Clinical Security & Privacy Safeguards:**
+  - File validation: PNG, JPEG, WebP; strict 15MB file size limit; rejects 0-byte or corrupted files.
+  - In-memory event audit trail logging analysis actions, timestamps, and actors without storing raw image pixel data.
+  - Zero external network transmissions; patient data and radiographs remain strictly local to the session and edge service.
+
 ### Movement & Computer Vision Features (Phase 9: Functional Pose Estimation & Movement Evaluation)
 - **Local In-Browser MediaPipe Pose Estimation:** 33-landmark pose tracking running client-side via Google MediaPipe PoseLandmarker (Lite float16 model) using WebAssembly (WASM) and WebGL/GPU execution with automatic CPU fallback.
 - **Local Asset Strategy with Fallback:** Fully offline-capable using local bundled assets (`public/models/pose_landmarker_lite.task` [5.77 MB] and `public/wasm/`), with automatic fallback to jsDelivr/Google Cloud CDN if local file access is restricted.

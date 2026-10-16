@@ -15,6 +15,11 @@ import {
 } from "../src/logic/movementFeatureEvaluation.ts";
 import { convertMovementEvaluationToGaitOutput } from "../src/services/gaitAnalysisService.ts";
 import { evaluateScreening, type FormValues, emptyForm } from "../src/logic/screeningRules.ts";
+import {
+  calculateLiveMetrics,
+  getEmptyLiveMetrics,
+  resetPoseTimestamp,
+} from "../src/services/livePoseEstimation.ts";
 
 /**
  * HELPER: Generates a synthetic walking cycle frame sequence for deterministic testing.
@@ -350,5 +355,124 @@ describe("OA-Sathi Movement Feature Evaluation & Quality Indicator Test Suite", 
     // Even if gait assessment failed or had low quality, symptom score is unchanged
     assert.ok(gaitOutput.technicalQuality);
     assert.equal(gaitOutput.recordId, form.name);
+  });
+
+  // 16. calculateLiveMetrics extracts bilateral knee angles, trunk tilt, and shoulder/pelvic alignment
+  it("16. calculateLiveMetrics extracts bilateral knee angles, trunk tilt, and shoulder/pelvic alignment", () => {
+    const dummyLandmarks = Array.from({ length: 33 }, () => ({
+      x: 0.5,
+      y: 0.5,
+      z: 0.0,
+      visibility: 0.9,
+    }));
+
+    // Shoulders: L at (0.4, 0.2), R at (0.6, 0.2) -> level shoulders
+    dummyLandmarks[11] = { x: 0.4, y: 0.2, z: 0.0, visibility: 0.95 };
+    dummyLandmarks[12] = { x: 0.6, y: 0.2, z: 0.0, visibility: 0.95 };
+
+    // Hips: L at (0.4, 0.5), R at (0.6, 0.5) -> level pelvis
+    dummyLandmarks[23] = { x: 0.4, y: 0.5, z: 0.0, visibility: 0.95 };
+    dummyLandmarks[24] = { x: 0.6, y: 0.5, z: 0.0, visibility: 0.95 };
+
+    // Left leg straight: Hip(0.4, 0.5), Knee(0.4, 0.75), Ankle(0.4, 1.0)
+    dummyLandmarks[25] = { x: 0.4, y: 0.75, z: 0.0, visibility: 0.95 };
+    dummyLandmarks[27] = { x: 0.4, y: 1.0, z: 0.0, visibility: 0.95 };
+
+    // Right leg flexed at 90 deg: Hip(0.6, 0.5), Knee(0.6, 0.75), Ankle(0.85, 0.75)
+    dummyLandmarks[26] = { x: 0.6, y: 0.75, z: 0.0, visibility: 0.95 };
+    dummyLandmarks[28] = { x: 0.85, y: 0.75, z: 0.0, visibility: 0.95 };
+
+    const metrics = calculateLiveMetrics(dummyLandmarks);
+    assert.equal(metrics.landmarksDetected, 33);
+    assert.ok(metrics.confidenceScore >= 80);
+    assert.ok(metrics.leftKneeAngleDeg !== null && metrics.leftKneeAngleDeg >= 170, "Left extended knee should be ~180°");
+    assert.ok(metrics.rightKneeAngleDeg !== null && metrics.rightKneeAngleDeg >= 80 && metrics.rightKneeAngleDeg <= 100, "Right bent knee should be ~90°");
+    assert.ok(metrics.trunkTiltDeg !== null && metrics.trunkTiltDeg <= 5, "Vertical trunk tilt should be near 0°");
+    assert.ok(metrics.shoulderTiltDeg !== null && metrics.shoulderTiltDeg <= 2, "Level shoulders should have ~0° tilt");
+    assert.ok(metrics.pelvicTiltDeg !== null && metrics.pelvicTiltDeg <= 2, "Level hips should have ~0° tilt");
+    assert.equal(metrics.personInView, true);
+    assert.equal(metrics.lowerBodyVisible, true);
+    assert.equal(metrics.trackingQuality, "good");
+  });
+
+  // 17. calculateLiveMetrics strictly returns null for occluded limbs without false zeros
+  it("17. calculateLiveMetrics strictly returns null for occluded limbs without false zeros", () => {
+    const dummyLandmarks = Array.from({ length: 33 }, () => ({
+      x: 0.5,
+      y: 0.5,
+      z: 0.0,
+      visibility: 0.9,
+    }));
+
+    // Shoulders valid
+    dummyLandmarks[11] = { x: 0.4, y: 0.2, z: 0.0, visibility: 0.9 };
+    dummyLandmarks[12] = { x: 0.6, y: 0.2, z: 0.0, visibility: 0.9 };
+    dummyLandmarks[23] = { x: 0.4, y: 0.5, z: 0.0, visibility: 0.9 };
+    dummyLandmarks[24] = { x: 0.6, y: 0.5, z: 0.0, visibility: 0.9 };
+
+    // Left knee occluded (< 0.4)
+    dummyLandmarks[25] = { x: 0.4, y: 0.75, z: 0.0, visibility: 0.15 };
+    dummyLandmarks[27] = { x: 0.4, y: 1.0, z: 0.0, visibility: 0.9 };
+
+    // Right leg visible and straight
+    dummyLandmarks[26] = { x: 0.6, y: 0.75, z: 0.0, visibility: 0.9 };
+    dummyLandmarks[28] = { x: 0.6, y: 1.0, z: 0.0, visibility: 0.9 };
+
+    const metrics = calculateLiveMetrics(dummyLandmarks);
+    assert.equal(metrics.leftKneeAngleDeg, null, "Occluded left knee must be null, never 0");
+    assert.ok(metrics.rightKneeAngleDeg !== null && metrics.rightKneeAngleDeg >= 170, "Visible right knee should be calculated");
+    assert.ok(metrics.kneeAngleDeg !== null && metrics.kneeAngleDeg >= 170, "Primary knee defaults to visible right leg");
+    assert.equal(metrics.lowerBodyVisible, true);
+  });
+
+  // 18. getEmptyLiveMetrics returns safe neutral baseline
+  it("18. getEmptyLiveMetrics returns safe neutral baseline", () => {
+    const empty = getEmptyLiveMetrics();
+    assert.equal(empty.kneeAngleDeg, null);
+    assert.equal(empty.leftKneeAngleDeg, null);
+    assert.equal(empty.rightKneeAngleDeg, null);
+    assert.equal(empty.trunkTiltDeg, null);
+    assert.equal(empty.shoulderTiltDeg, null);
+    assert.equal(empty.pelvicTiltDeg, null);
+    assert.equal(empty.confidenceScore, 0);
+    assert.equal(empty.landmarksDetected, 0);
+    assert.equal(empty.personInView, false);
+    assert.equal(empty.lowerBodyVisible, false);
+    assert.equal(empty.trackingQuality, "none");
+  });
+
+  // 19. resetPoseTimestamp executes safely
+  it("19. resetPoseTimestamp executes safely", () => {
+    assert.doesNotThrow(() => {
+      resetPoseTimestamp();
+    });
+  });
+
+  // 20. calculateLiveMetrics assigns trackingQuality tiers deterministically
+  it("20. calculateLiveMetrics assigns trackingQuality tiers deterministically", () => {
+    // Zero visibility landmarks
+    const zeroVis = Array.from({ length: 33 }, () => ({
+      x: 0.5,
+      y: 0.5,
+      z: 0.0,
+      visibility: 0.05,
+    }));
+    const metricsZero = calculateLiveMetrics(zeroVis);
+    assert.equal(metricsZero.trackingQuality, "none");
+    assert.equal(metricsZero.personInView, false);
+
+    // Torso only with moderate confidence (fair)
+    const torsoOnly = Array.from({ length: 33 }, () => ({
+      x: 0.5,
+      y: 0.5,
+      z: 0.0,
+      visibility: 0.6,
+    }));
+    // Lower limb joints occluded
+    torsoOnly[25] = { x: 0.4, y: 0.75, z: 0.0, visibility: 0.1 };
+    torsoOnly[26] = { x: 0.6, y: 0.75, z: 0.0, visibility: 0.1 };
+    const metricsFair = calculateLiveMetrics(torsoOnly);
+    assert.equal(metricsFair.trackingQuality, "fair");
+    assert.equal(metricsFair.lowerBodyVisible, false);
   });
 });
