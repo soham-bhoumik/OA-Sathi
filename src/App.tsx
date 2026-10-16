@@ -24,6 +24,7 @@ import {
   ClipboardCheck,
   Clock3,
   Download,
+  FileEdit,
   FileHeart,
   FilePlus2,
   HeartPulse,
@@ -42,278 +43,25 @@ import {
   X,
 } from "lucide-react";
 
-type Page = "overview" | "screening" | "records";
-type Joint = "Knee" | "Hip" | "Hand" | "Other";
-type RiskBand = "Lower markers" | "Some markers" | "More markers";
-type TriState = boolean | "not-checked";
-const NOT_CHECKED = "not-checked" as const;
-const STORAGE_KEY = "oa_sathi_screenings_v1";
-
-type Screening = {
-  id: string;
-  name: string;
-  age: number;
-  district: string;
-  joint: Joint;
-  score: number;
-  band: RiskBand;
-  markers: string[];
-  date: string;
-  timestamp?: number;
-};
-
-type FormValues = {
-  name: string;
-  age: string;
-  district: string;
-  joint: Joint | "";
-  painDuration: string;
-  painLevel: number;
-  stiffness: string;
-  mobility: string;
-  previousInjury: TriState;
-  familyHistory: TriState;
-  repeatedLoad: TriState;
-};
-
-const districts = [
-  "Choose a district",
-  "East Khasi Hills",
-  "West Khasi Hills",
-  "Ri-Bhoi",
-  "East Jaintia Hills",
-  "West Jaintia Hills",
-  "East Garo Hills",
-  "West Garo Hills",
-  "South Garo Hills",
-  "Imphal West",
-  "Imphal East",
-  "Aizawl",
-  "Kohima",
-  "Dimapur",
-  "Papum Pare",
-  "Dibrugarh",
-  "Kamrup Metropolitan",
-  "Other",
-] as const;
-
-const initialForm: FormValues = {
-  name: "",
-  age: "",
-  district: "",
-  joint: "",
-  painDuration: "",
-  painLevel: 3,
-  stiffness: "",
-  mobility: "",
-  previousInjury: "not-checked",
-  familyHistory: "not-checked",
-  repeatedLoad: "not-checked",
-};
-
-const sampleScreenings: Screening[] = [
-  {
-    id: "OS-0248",
-    name: "Anonymised · 62 yrs",
-    age: 62,
-    district: "East Khasi Hills",
-    joint: "Knee",
-    score: 96,
-    band: "More markers",
-    markers: [
-      "Age recorded: 62 years.",
-      "Joint symptoms have lasted over 3 months.",
-      "Discomfort rating: 7 out of 10.",
-      "Stiffness after rest: 30 minutes or more.",
-      "Everyday activities: affected quite a bit.",
-      "Previous joint injury: reported.",
-      "Family history of joint problems: not reported.",
-      "Frequent heavy or repetitive activity: not reported.",
-    ],
-    date: "Today, 10:42 am",
-    timestamp: Date.now() - 1000 * 60 * 60 * 2,
-  },
-  {
-    id: "OS-0247",
-    name: "Anonymised · 54 yrs",
-    age: 54,
-    district: "Ri-Bhoi",
-    joint: "Hip",
-    score: 51,
-    band: "Some markers",
-    markers: [
-      "Age recorded: 54 years.",
-      "Joint symptoms have lasted 1–3 months.",
-      "Discomfort rating: 5 out of 10.",
-      "Stiffness after rest: less than 30 minutes.",
-      "Everyday activities: affected a little.",
-      "Previous joint injury: not reported.",
-      "Family history of joint problems: not reported.",
-      "Frequent heavy or repetitive activity: not reported.",
-    ],
-    date: "Today, 10:18 am",
-    timestamp: Date.now() - 1000 * 60 * 60 * 3,
-  },
-  {
-    id: "OS-0246",
-    name: "Anonymised · 47 yrs",
-    age: 47,
-    district: "Imphal West",
-    joint: "Knee",
-    score: 19,
-    band: "Lower markers",
-    markers: [
-      "Age recorded: 47 years.",
-      "Joint symptoms have lasted less than 2 weeks.",
-      "Discomfort rating: 2 out of 10.",
-      "Stiffness after rest: no stiffness.",
-      "Everyday activities: not affected.",
-      "Previous joint injury: not reported.",
-      "Family history of joint problems: not reported.",
-      "Frequent heavy or repetitive activity: not reported.",
-    ],
-    date: "Today, 9:56 am",
-    timestamp: Date.now() - 1000 * 60 * 60 * 4,
-  },
-];
-
-const emptyForm = (): FormValues => ({ ...initialForm });
-
-const DURATION_LABELS: Record<string, string> = {
-  "under-2-weeks": "less than 2 weeks",
-  "2-4-weeks": "2–4 weeks",
-  "1-3-months": "1–3 months",
-  "over-3-months": "over 3 months",
-  "not-checked": "not checked",
-};
-
-const STIFFNESS_LABELS: Record<string, string> = {
-  none: "no stiffness",
-  "under-30": "less than 30 minutes",
-  "over-30": "30 minutes or more",
-  "not-checked": "not checked",
-};
-
-const MOBILITY_LABELS: Record<string, string> = {
-  no: "not affected",
-  some: "affected a little",
-  significant: "affected quite a bit",
-  "not-checked": "not checked",
-};
-
-function sanitizeText(value: string, maxLength = 60): string {
-  return value
-    .replace(/[\x00-\x1F\x7F-\x9F]/g, "")
-    .trim()
-    .slice(0, maxLength);
-}
-
-function loadStoredScreenings(): Screening[] {
-  try {
-    if (typeof window === "undefined" || !window.localStorage) {
-      return sampleScreenings;
-    }
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return sampleScreenings;
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed) && parsed.length > 0) {
-      const validJoints = new Set(["Knee", "Hip", "Hand", "Other"]);
-      const validBands = new Set(["Lower markers", "Some markers", "More markers"]);
-      return parsed.map((item: unknown) => {
-        const record = item as Partial<Screening>;
-        return {
-          id: typeof record.id === "string" ? record.id : `OS-${String(Math.floor(Math.random() * 9000) + 1000)}`,
-          name: typeof record.name === "string" ? sanitizeText(record.name) : "Anonymised",
-          age: typeof record.age === "number" && !isNaN(record.age) ? record.age : 50,
-          district: typeof record.district === "string" ? record.district : "Other",
-          joint: (record.joint && validJoints.has(record.joint) ? record.joint : "Other") as Joint,
-          score: typeof record.score === "number" && !isNaN(record.score) ? record.score : 0,
-          band: (record.band && validBands.has(record.band) ? record.band : "Lower markers") as RiskBand,
-          markers: Array.isArray(record.markers)
-            ? record.markers.filter((m): m is string => typeof m === "string")
-            : [],
-          date: typeof record.date === "string" ? record.date : "Today",
-          timestamp: typeof record.timestamp === "number" ? record.timestamp : undefined,
-        };
-      });
-    }
-  } catch {
-    // Graceful fallback for privacy mode / storage quota failures
-  }
-  return sampleScreenings;
-}
-
-function saveStoredScreenings(records: Screening[]): void {
-  try {
-    if (typeof window === "undefined" || !window.localStorage) return;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
-  } catch {
-    // Non-blocking quota or permission handling
-  }
-}
-
-function isRecordFromToday(record: Screening): boolean {
-  if (record.timestamp) {
-    const recordDate = new Date(record.timestamp);
-    const today = new Date();
-    return (
-      recordDate.getDate() === today.getDate() &&
-      recordDate.getMonth() === today.getMonth() &&
-      recordDate.getFullYear() === today.getFullYear()
-    );
-  }
-  return record.date.startsWith("Today");
-}
-
-function calculateRisk(values: FormValues): number {
-  const age = Number(values.age);
-  let score = 0;
-  if (age >= 60) score += 25;
-  else if (age >= 45) score += 15;
-  else if (age >= 35) score += 7;
-
-  score +=
-    values.painDuration === "over-3-months"
-      ? 20
-      : values.painDuration === "1-3-months"
-        ? 13
-        : values.painDuration === "2-4-weeks"
-          ? 7
-          : 0;
-  score += values.painLevel >= 7 ? 15 : values.painLevel >= 4 ? 9 : values.painLevel >= 1 ? 4 : 0;
-  score += values.stiffness === "over-30" ? 12 : values.stiffness === "under-30" ? 6 : 0;
-  score += values.mobility === "significant" ? 14 : values.mobility === "some" ? 8 : 0;
-  score += values.previousInjury === true ? 10 : 0;
-  score += values.familyHistory === true ? 7 : 0;
-  score += values.repeatedLoad === true ? 7 : 0;
-  return Math.min(score, 100);
-}
-
-function getRiskBand(score: number): RiskBand {
-  if (score >= 60) return "More markers";
-  if (score >= 32) return "Some markers";
-  return "Lower markers";
-}
-
-function buildMarkers(values: FormValues): string[] {
-  const previousInjuryLabel =
-    values.previousInjury === true ? "reported" : values.previousInjury === false ? "not reported" : "not checked";
-  const familyHistoryLabel =
-    values.familyHistory === true ? "reported" : values.familyHistory === false ? "not reported" : "not checked";
-  const repeatedLoadLabel =
-    values.repeatedLoad === true ? "reported" : values.repeatedLoad === false ? "not reported" : "not checked";
-
-  return [
-    `Age recorded: ${values.age} years.`,
-    `Joint symptoms have lasted ${DURATION_LABELS[values.painDuration] ?? "not checked"}.`,
-    `Discomfort rating: ${values.painLevel} out of 10.`,
-    `Stiffness after rest: ${STIFFNESS_LABELS[values.stiffness] ?? "not checked"}.`,
-    `Everyday activities: ${MOBILITY_LABELS[values.mobility] ?? "not checked"}.`,
-    `Previous joint injury: ${previousInjuryLabel}.`,
-    `Family history of joint problems: ${familyHistoryLabel}.`,
-    `Frequent heavy or repetitive activity: ${repeatedLoadLabel}.`,
-  ];
-}
+import {
+  calculateDashboardStats,
+  districts,
+  emptyForm,
+  evaluateScreening,
+  exportRecordsToCsv,
+  generateStableId,
+  loadStoredScreenings,
+  saveStoredScreenings,
+  sanitizeText,
+  validateScreeningInput,
+  type FormValues,
+  type Joint,
+  type Page,
+  type RiskBand,
+  type Screening,
+  type TriStateAnswer,
+  NOT_CHECKED,
+} from "./logic/screeningRules";
 
 function App() {
   const [page, setPage] = useState<Page>("overview");
@@ -321,18 +69,20 @@ function App() {
   const [form, setForm] = useState<FormValues>(emptyForm);
   const [screenings, setScreenings] = useState<Screening[]>(loadStoredScreenings);
   const [result, setResult] = useState<Screening | null>(null);
+  const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
   const [consent, setConsent] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [search, setSearch] = useState("");
   const [cameraStatus, setCameraStatus] = useState<"idle" | "ready" | "unsupported" | "denied" | "error">("idle");
   const [cameraMessage, setCameraMessage] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const lastSavedRef = useRef<string>("");
 
-  // Save to localStorage safely when screenings change, without duplicate writes
+  // Persist records to storage safely without duplicate writes
   useEffect(() => {
     try {
       const serialized = JSON.stringify(screenings);
@@ -341,7 +91,7 @@ function App() {
         saveStoredScreenings(screenings);
       }
     } catch {
-      // Ignore serialization issues
+      // Non-blocking quota error handling
     }
   }, [screenings]);
 
@@ -352,7 +102,7 @@ function App() {
         try {
           track.stop();
         } catch {
-          // ignore track stop error
+          // ignore
         }
       });
       cameraStreamRef.current = null;
@@ -364,7 +114,6 @@ function App() {
     setCameraMessage("");
   }, []);
 
-  // Cleanup camera stream on unmount
   useEffect(() => {
     return () => {
       stopCamera();
@@ -406,7 +155,6 @@ function App() {
     }
   }, [stopCamera]);
 
-  // Synchronize video element srcObject when camera becomes ready
   useEffect(() => {
     if (cameraStatus === "ready" && cameraStreamRef.current && videoRef.current) {
       if (videoRef.current.srcObject !== cameraStreamRef.current) {
@@ -416,7 +164,7 @@ function App() {
     }
   }, [cameraStatus]);
 
-  // Optimized search without intermediate array allocations
+  // High-performance search without array allocations per item
   const filteredScreenings = useMemo(() => {
     const query = search.trim().toLowerCase();
     if (!query) return screenings;
@@ -431,13 +179,11 @@ function App() {
     });
   }, [screenings, search]);
 
-  // Stable form updater with no external dependencies
   const updateForm = useCallback(<K extends keyof FormValues>(key: K, value: FormValues[K]) => {
     setForm((current) => ({ ...current, [key]: value }));
     setError((prev) => (prev ? "" : prev));
   }, []);
 
-  // Safe navigation preserving workflow state and preventing background camera resource leaks
   const navigate = useCallback(
     (nextPage: Page) => {
       if (page === "screening" && nextPage !== "screening") {
@@ -450,10 +196,10 @@ function App() {
     [page, stopCamera]
   );
 
-  // Start fresh screening workflow
   const startScreening = useCallback(() => {
     stopCamera();
     setResult(null);
+    setEditingRecordId(null);
     setForm(emptyForm());
     setConsent(false);
     setError("");
@@ -462,71 +208,135 @@ function App() {
     setMobileNavOpen(false);
   }, [stopCamera]);
 
-  // Resume or start screening without clearing an in-progress draft
-  const goToScreeningTab = useCallback(() => {
+  const handleOpenScreeningTab = useCallback(() => {
     stopCamera();
+    // If viewing a completed result, reset so the screening form appears
+    if (result) {
+      setResult(null);
+      setEditingRecordId(null);
+      setForm(emptyForm());
+      setConsent(false);
+    }
     setPage("screening");
     setMobileNavOpen(false);
     setNotice("");
-  }, [stopCamera]);
+  }, [result, stopCamera]);
+
+  const handleEditScreening = useCallback(
+    (recordToEdit: Screening) => {
+      stopCamera();
+      if (recordToEdit.formAnswers) {
+        setForm({ ...recordToEdit.formAnswers });
+      } else {
+        setForm({
+          name: recordToEdit.name.startsWith("Anonymised") ? "" : recordToEdit.name,
+          age: String(recordToEdit.age),
+          district: recordToEdit.district,
+          joint: recordToEdit.joint,
+          painDuration: "1-3-months",
+          painLevel: 5,
+          stiffness: "under-30",
+          mobility: "some",
+          previousInjury: "unanswered",
+          familyHistory: "unanswered",
+          repeatedLoad: "unanswered",
+          heightCm: "",
+          weightKg: "",
+        });
+      }
+      setEditingRecordId(recordToEdit.id);
+      setConsent(true);
+      setResult(null);
+      setError("");
+      setPage("screening");
+      setNotice(`Editing record ${recordToEdit.id}. Modify answers and click update.`);
+    },
+    [stopCamera]
+  );
 
   const handleSubmit = useCallback(
     (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
-      const age = Number(form.age);
-      if (!Number.isInteger(age) || age < 18 || age > 110) {
-        setError("Please enter an age between 18 and 110 years.");
-        return;
-      }
-      if (
-        !form.district ||
-        form.district === "Choose a district" ||
-        !form.joint ||
-        !form.painDuration ||
-        !form.stiffness ||
-        !form.mobility
-      ) {
-        setError("Please complete each required field before generating the screening summary.");
-        return;
-      }
-      if (!consent) {
-        setError("Please confirm that the person understands this is a voluntary, non-diagnostic screening.");
+      if (isSubmitting) return;
+
+      const validation = validateScreeningInput(form, consent);
+      if (!validation.isValid) {
+        setError(validation.error || "Please complete each required field before generating the screening summary.");
         return;
       }
 
-      // Stop camera once summary is generated to preserve battery and privacy
+      setIsSubmitting(true);
       stopCamera();
 
-      const score = calculateRisk(form);
-      const lastReference = screenings.reduce((max, item) => {
-        const match = item.id.match(/\d+/);
-        const referenceNumber = match ? parseInt(match[0], 10) : 0;
-        return Math.max(max, isNaN(referenceNumber) ? 0 : referenceNumber);
-      }, 248);
-
+      const evaluation = evaluateScreening(form);
       const now = new Date();
       const timeFormatter = new Intl.DateTimeFormat("en-IN", { timeStyle: "short" });
-      const sanitizedName = sanitizeText(form.name);
+      const ageNum = Number(form.age);
+      const cleanName = sanitizeText(form.name) || `Anonymised · ${ageNum} yrs`;
 
-      const nextResult: Screening = {
-        id: `OS-${String(lastReference + 1).padStart(4, "0")}`,
-        name: sanitizedName || `Anonymised · ${age} yrs`,
-        age,
-        district: form.district,
-        joint: form.joint,
-        score,
-        band: getRiskBand(score),
-        markers: buildMarkers(form),
-        date: `Today, ${timeFormatter.format(now)}`,
-        timestamp: now.getTime(),
-      };
+      if (editingRecordId) {
+        // Update existing record without creating a duplicate
+        const targetId = editingRecordId;
+        const updatedScreening: Screening = {
+          id: targetId,
+          name: cleanName,
+          age: ageNum,
+          district: form.district,
+          joint: form.joint as Joint,
+          score: evaluation.score,
+          band: evaluation.band,
+          markers: evaluation.markers,
+          date: `Today, ${timeFormatter.format(now)}`,
+          timestamp: now.getTime(),
+          updatedAt: now.getTime(),
+          formAnswers: { ...form },
+          contributingFactors: evaluation.contributingFactors,
+          absentFactors: evaluation.absentFactors,
+          unassessedFactors: evaluation.unassessedFactors,
+          assessedCount: evaluation.assessedCount,
+          totalQuestions: evaluation.totalQuestions,
+          bmi: evaluation.bmi,
+        };
 
-      setResult(nextResult);
-      setScreenings((current) => [nextResult, ...current]);
-      setError("");
-      setNotice("Screening summary created and saved to your browser session.");
+        setScreenings((current) =>
+          current.map((item) => (item.id === targetId ? updatedScreening : item))
+        );
+        setResult(updatedScreening);
+        setEditingRecordId(null);
+        setError("");
+        setNotice(`Screening record ${targetId} updated successfully.`);
+      } else {
+        // Create a new record with a unique stable ID
+        const newId = generateStableId(screenings);
+        const nextResult: Screening = {
+          id: newId,
+          name: cleanName,
+          age: ageNum,
+          district: form.district,
+          joint: form.joint as Joint,
+          score: evaluation.score,
+          band: evaluation.band,
+          markers: evaluation.markers,
+          date: `Today, ${timeFormatter.format(now)}`,
+          timestamp: now.getTime(),
+          formAnswers: { ...form },
+          contributingFactors: evaluation.contributingFactors,
+          absentFactors: evaluation.absentFactors,
+          unassessedFactors: evaluation.unassessedFactors,
+          assessedCount: evaluation.assessedCount,
+          totalQuestions: evaluation.totalQuestions,
+          bmi: evaluation.bmi,
+        };
+
+        setScreenings((current) => [nextResult, ...current]);
+        setResult(nextResult);
+        setError("");
+        setNotice("Screening summary created. It is stored only for this browser session.");
+      }
+
+      setIsSubmitting(false);
     },
-    [consent, form, screenings, stopCamera]
+    [consent, editingRecordId, form, isSubmitting, screenings, stopCamera]
   );
 
   const exportSummary = useCallback(() => {
@@ -550,6 +360,18 @@ function App() {
     link.click();
     window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
   }, [result]);
+
+  const handleExportCsv = useCallback(() => {
+    const csvData = exportRecordsToCsv(screenings);
+    const link = document.createElement("a");
+    const downloadUrl = URL.createObjectURL(new Blob([csvData], { type: "text/csv;charset=utf-8;" }));
+    link.href = downloadUrl;
+    const dateStr = new Date().toISOString().slice(0, 10);
+    link.download = `oa-sathi-screenings-${dateStr}.csv`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+    setNotice("Screening records exported to CSV successfully.");
+  }, [screenings]);
 
   const handleOpenScreening = useCallback((item: Screening) => {
     setResult(item);
@@ -587,7 +409,7 @@ function App() {
           </button>
           <button
             className={`nav-item ${page === "screening" ? "active" : ""}`}
-            onClick={goToScreeningTab}
+            onClick={handleOpenScreeningTab}
           >
             <FilePlus2 size={18} />
             <span>New screening</span>
@@ -708,6 +530,7 @@ function App() {
           <ScreeningPage
             form={form}
             result={result}
+            editingRecordId={editingRecordId}
             consent={consent}
             error={error}
             onChange={updateForm}
@@ -715,11 +538,13 @@ function App() {
             onSubmit={handleSubmit}
             onExport={exportSummary}
             onStartNew={startScreening}
+            onEdit={handleEditScreening}
             cameraStatus={cameraStatus}
             cameraMessage={cameraMessage}
             onStartCamera={startCamera}
             onStopCamera={stopCamera}
             videoRef={videoRef}
+            isSubmitting={isSubmitting}
           />
         )}
         {page === "records" && (
@@ -730,6 +555,7 @@ function App() {
             onSearch={setSearch}
             onNew={startScreening}
             onOpen={handleOpenScreening}
+            onExportCsv={handleExportCsv}
           />
         )}
       </main>
@@ -748,22 +574,7 @@ const Overview = memo(function Overview({
   onRecords: () => void;
   onOpenScreening: (item: Screening) => void;
 }) {
-  // Single-pass computation for dashboard stats without repeated array allocations
-  const stats = useMemo(() => {
-    let today = 0;
-    let followup = 0;
-    for (let i = 0; i < screenings.length; i++) {
-      const record = screenings[i];
-      if (isRecordFromToday(record)) today++;
-      if (record.band === "More markers") followup++;
-    }
-    return {
-      today: String(today).padStart(2, "0"),
-      followup: String(followup).padStart(2, "0"),
-      total: String(screenings.length).padStart(2, "0"),
-    };
-  }, [screenings]);
-
+  const stats = useMemo(() => calculateDashboardStats(screenings), [screenings]);
   const recentScreenings = useMemo(() => screenings.slice(0, 4), [screenings]);
 
   return (
@@ -834,7 +645,7 @@ const Overview = memo(function Overview({
           tone="blue"
           trend={
             <>
-              <ArrowUpRight size={13} /> Demo data
+              <ArrowUpRight size={13} /> Active records
             </>
           }
         />
@@ -1026,10 +837,10 @@ const ScreeningTable = memo(function ScreeningTable({
       </div>
       <div className="table-footer">
         <span>
-          Showing <strong>{screenings.length}</strong> recent records
+          Showing <strong>{screenings.length}</strong> records
         </span>
         <span>
-          <span className="footer-dot" /> Demo records
+          <span className="footer-dot" /> Verified session records
         </span>
       </div>
     </div>
@@ -1049,6 +860,7 @@ const RiskBadge = memo(function RiskBadge({ band }: { band: RiskBand }) {
 const ScreeningPage = memo(function ScreeningPage({
   form,
   result,
+  editingRecordId,
   consent,
   error,
   onChange,
@@ -1056,14 +868,17 @@ const ScreeningPage = memo(function ScreeningPage({
   onSubmit,
   onExport,
   onStartNew,
+  onEdit,
   cameraStatus,
   cameraMessage,
   onStartCamera,
   onStopCamera,
   videoRef,
+  isSubmitting,
 }: {
   form: FormValues;
   result: Screening | null;
+  editingRecordId: string | null;
   consent: boolean;
   error: string;
   onChange: <K extends keyof FormValues>(key: K, value: FormValues[K]) => void;
@@ -1071,11 +886,13 @@ const ScreeningPage = memo(function ScreeningPage({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onExport: () => void;
   onStartNew: () => void;
+  onEdit: (record: Screening) => void;
   cameraStatus: "idle" | "ready" | "unsupported" | "denied" | "error";
   cameraMessage: string;
   onStartCamera: () => void;
   onStopCamera: () => void;
   videoRef: RefObject<HTMLVideoElement>;
+  isSubmitting: boolean;
 }) {
   return (
     <div className="page-content">
@@ -1084,24 +901,37 @@ const ScreeningPage = memo(function ScreeningPage({
           <div className="eyebrow">
             <span className="eyebrow-dot" /> GUIDED COMMUNITY SCREENING
           </div>
-          <h1>{result ? "Screening summary" : "A conversation about joint health"}</h1>
+          <h1>
+            {result
+              ? "Screening summary"
+              : editingRecordId
+                ? `Edit screening (${editingRecordId})`
+                : "A conversation about joint health"}
+          </h1>
           <p className="page-subtitle">
             {result
               ? "A clear, explainable summary to support the next conversation."
-              : "Take your time. There are no right or wrong answers."}
+              : editingRecordId
+                ? "Update previously collected participant responses without creating duplicates."
+                : "Take your time. There are no right or wrong answers."}
           </p>
         </div>
         {!result && (
           <div className="step-indicator">
-            <span className="step-current">01</span>
+            <span className="step-current">{editingRecordId ? "ED" : "01"}</span>
             <span className="step-line" />
-            <span>SCREENING</span>
+            <span>{editingRecordId ? "EDITING" : "SCREENING"}</span>
           </div>
         )}
       </div>
 
       {result ? (
-        <ResultSummary result={result} onExport={onExport} onStartNew={onStartNew} />
+        <ResultSummary
+          result={result}
+          onExport={onExport}
+          onStartNew={onStartNew}
+          onEdit={() => onEdit(result)}
+        />
       ) : (
         <form className="screening-form" onSubmit={onSubmit} noValidate>
           <div className="screening-main">
@@ -1410,8 +1240,10 @@ const ScreeningPage = memo(function ScreeningPage({
               <span>
                 <ShieldCheck size={16} /> No personal data leaves this browser
               </span>
-              <button className="button button-primary" type="submit">
-                <Sparkles size={16} /> Generate screening summary <ArrowRight size={16} />
+              <button className="button button-primary" type="submit" disabled={isSubmitting}>
+                <Sparkles size={16} />{" "}
+                {editingRecordId ? "Update screening summary" : "Generate screening summary"}{" "}
+                <ArrowRight size={16} />
               </button>
             </div>
           </div>
@@ -1471,7 +1303,6 @@ const Choice = memo(function Choice({
   );
 });
 
-// Changed outer element from <label> to <div> to eliminate invalid nested interactive button elements in HTML
 const TriStateRow = memo(function TriStateRow({
   title,
   description,
@@ -1480,18 +1311,19 @@ const TriStateRow = memo(function TriStateRow({
 }: {
   title: string;
   description: string;
-  value: TriState;
-  onChange: (value: TriState) => void;
+  value: TriStateAnswer;
+  onChange: (value: TriStateAnswer) => void;
 }) {
   const isChecked = value === true;
   const isNotChecked = value === NOT_CHECKED;
+  const isFalse = value === false;
   return (
     <div className="toggle-row tri-state-row">
       <span>
         <strong>{title}</strong>
         <small>{description}</small>
       </span>
-      <div className="tri-state-controls" role="group" aria-label={`${title} options`}>
+      <div className="tri-state-controls" role="group" aria-label={`${title} answer`}>
         <button
           type="button"
           className={`tri-state-button ${isNotChecked ? "selected" : ""}`}
@@ -1510,9 +1342,9 @@ const TriStateRow = memo(function TriStateRow({
         </button>
         <button
           type="button"
-          className={`tri-state-button ${value === false ? "selected" : ""}`}
+          className={`tri-state-button ${isFalse ? "selected" : ""}`}
           onClick={() => onChange(false)}
-          aria-pressed={value === false}
+          aria-pressed={isFalse}
         >
           No
         </button>
@@ -1525,11 +1357,15 @@ const ResultSummary = memo(function ResultSummary({
   result,
   onExport,
   onStartNew,
+  onEdit,
 }: {
   result: Screening;
   onExport: () => void;
   onStartNew: () => void;
+  onEdit: () => void;
 }) {
+  const isPreliminary = Array.isArray(result.unassessedFactors) && result.unassessedFactors.length >= 3;
+
   return (
     <div className="result-layout">
       <div className="result-main">
@@ -1594,7 +1430,7 @@ const ResultSummary = memo(function ResultSummary({
           </div>
           <p className="explanation-intro">
             This prototype uses a transparent, rules-based demo score; no AI model or clinically validated prediction is
-            running. These are the answers included in the summary:
+            running.{isPreliminary ? " Note: This preliminary summary is based on partial assessment; unassessed items are not evidence of absent risk." : ""} These are the answers included in the summary:
           </p>
           <ul className="factor-list">
             {result.markers.map((marker, index) => (
@@ -1621,6 +1457,9 @@ const ResultSummary = memo(function ResultSummary({
         <div className="result-actions">
           <button className="button button-secondary" onClick={onExport}>
             <Download size={16} /> Download summary
+          </button>
+          <button className="button button-secondary" onClick={onEdit} title="Edit these screening responses">
+            <FileEdit size={16} /> Edit record
           </button>
           <button className="button button-primary" onClick={onStartNew}>
             <Plus size={17} /> Start another screening
@@ -1663,6 +1502,7 @@ const RecordsPage = memo(function RecordsPage({
   onSearch,
   onNew,
   onOpen,
+  onExportCsv,
 }: {
   screenings: Screening[];
   total: number;
@@ -1670,6 +1510,7 @@ const RecordsPage = memo(function RecordsPage({
   onSearch: (value: string) => void;
   onNew: () => void;
   onOpen: (item: Screening) => void;
+  onExportCsv: () => void;
 }) {
   return (
     <div className="page-content">
@@ -1681,9 +1522,14 @@ const RecordsPage = memo(function RecordsPage({
           <h1>Screening records</h1>
           <p className="page-subtitle">A simple record of this browser session's screening conversations.</p>
         </div>
-        <button className="button button-primary" onClick={onNew}>
-          <Plus size={17} /> New screening
-        </button>
+        <div style={{ display: "flex", gap: "9px" }}>
+          <button className="button button-secondary" onClick={onExportCsv} title="Export all records as CSV">
+            <Download size={15} /> Export CSV
+          </button>
+          <button className="button button-primary" onClick={onNew}>
+            <Plus size={17} /> New screening
+          </button>
+        </div>
       </div>
 
       <div className="records-toolbar">
