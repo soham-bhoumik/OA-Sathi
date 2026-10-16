@@ -40,6 +40,17 @@ export interface LiveJointMetrics {
   trackingQuality: "good" | "fair" | "low" | "none";
 }
 
+export interface PosePerformanceTelemetry {
+  activeDelegate: "GPU" | "CPU" | "uninitialized";
+  processedFrames: number;
+  skippedFrames: number;
+  recentInferenceMs: number;
+  avgInferenceMs: number;
+  effectiveFps: number;
+  videoWidth: number;
+  videoHeight: number;
+}
+
 // MediaPipe Pose Landmark Indices
 const NOSE = 0;
 const LEFT_SHOULDER = 11;
@@ -84,6 +95,23 @@ export const SKELETON_CONNECTIONS: [number, number][] = [
 let landmarkerInstance: PoseLandmarker | null = null;
 let initializationPromise: Promise<PoseLandmarker> | null = null;
 let lastVideoTimestamp = -1;
+let lastVideoTimeSec = -1;
+let lastResultCache: PoseLandmarkerResult | null = null;
+let lastMetricsCache: LiveJointMetrics | null = null;
+
+let activeDelegate: "GPU" | "CPU" | "uninitialized" = "uninitialized";
+let processedFramesCounter = 0;
+let skippedFramesCounter = 0;
+let recentInferenceMs = 0;
+let totalInferenceMs = 0;
+let activeVideoWidth = 0;
+let activeVideoHeight = 0;
+
+let fpsWindowStart = 0;
+let framesInWindow = 0;
+let rollingEffectiveFps = 0;
+
+let smoothedLandmarksCache: NormalizedLandmark[] | null = null;
 
 const LOCAL_WASM_PATH = "/wasm";
 const CDN_WASM_PATH = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm";
@@ -103,10 +131,123 @@ function getAbsoluteUrl(pathOrUrl: string): string {
 }
 
 /**
- * Resets the video timestamp tracker so new video streams start fresh.
+ * Resets the video timestamp tracker and cached frame data so new video streams start fresh.
  */
 export function resetPoseTimestamp(): void {
   lastVideoTimestamp = -1;
+  lastVideoTimeSec = -1;
+  lastResultCache = null;
+  lastMetricsCache = null;
+  resetSmoothing();
+}
+
+/**
+ * Resets all runtime performance telemetry metrics.
+ */
+export function resetPoseTelemetry(): void {
+  processedFramesCounter = 0;
+  skippedFramesCounter = 0;
+  recentInferenceMs = 0;
+  totalInferenceMs = 0;
+  fpsWindowStart = 0;
+  framesInWindow = 0;
+  rollingEffectiveFps = 0;
+}
+
+/**
+ * Retrieves the current measured runtime performance telemetry.
+ */
+export function getPoseTelemetry(): PosePerformanceTelemetry {
+  const avg = processedFramesCounter > 0
+    ? Math.round((totalInferenceMs / processedFramesCounter) * 10) / 10
+    : 0;
+  return {
+    activeDelegate,
+    processedFrames: processedFramesCounter,
+    skippedFrames: skippedFramesCounter,
+    recentInferenceMs,
+    avgInferenceMs: avg,
+    effectiveFps: rollingEffectiveFps,
+    videoWidth: activeVideoWidth,
+    videoHeight: activeVideoHeight,
+  };
+}
+
+/**
+ * Returns the currently active execution delegate (GPU WebGL or CPU fallback).
+ */
+export function getActiveDelegate(): "GPU" | "CPU" | "uninitialized" {
+  return activeDelegate;
+}
+
+/**
+ * Applies an adaptive Exponential Moving Average (EMA) filter to 33 raw MediaPipe pose landmarks.
+ * Dynamic alpha:
+ * - Low displacement (< 0.01 norm dist): alpha = 0.60 (heavily dampens sensor jitter during standing/resting)
+ * - High displacement (> 0.08 norm dist): alpha = 0.92 (tracks rapid joint excursion without perceptible lag)
+ */
+export function smoothLandmarks(rawLandmarks: NormalizedLandmark[]): NormalizedLandmark[] {
+  if (!rawLandmarks || rawLandmarks.length === 0) {
+    smoothedLandmarksCache = null;
+    return [];
+  }
+  if (!smoothedLandmarksCache || smoothedLandmarksCache.length !== rawLandmarks.length) {
+    smoothedLandmarksCache = rawLandmarks.map((lm) => ({ ...lm }));
+    return smoothedLandmarksCache;
+  }
+
+  const smoothed: NormalizedLandmark[] = new Array(rawLandmarks.length);
+  for (let i = 0; i < rawLandmarks.length; i++) {
+    const cur = rawLandmarks[i];
+    const prev = smoothedLandmarksCache[i];
+    const dx = cur.x - prev.x;
+    const dy = cur.y - prev.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    // Adaptive alpha interpolation between 0.60 (still) and 0.92 (fast transition)
+    const normalizedSpeed = Math.min(1, dist / 0.08);
+    const alpha = 0.60 + normalizedSpeed * 0.32;
+
+    smoothed[i] = {
+      x: alpha * cur.x + (1 - alpha) * prev.x,
+      y: alpha * cur.y + (1 - alpha) * prev.y,
+      z: alpha * (cur.z ?? 0) + (1 - alpha) * (prev.z ?? 0),
+      visibility: cur.visibility,
+      presence: cur.presence,
+    };
+  }
+
+  smoothedLandmarksCache = smoothed;
+  return smoothed;
+}
+
+/**
+ * Resets the landmark smoother cache (e.g. between tasks or when user leaves the frame).
+ */
+export function resetSmoothing(): void {
+  smoothedLandmarksCache = null;
+}
+
+function recordInferenceTelemetry(durationMs: number, width: number, height: number): void {
+  processedFramesCounter++;
+  totalInferenceMs += durationMs;
+  recentInferenceMs = Math.round(durationMs * 10) / 10;
+  activeVideoWidth = width;
+  activeVideoHeight = height;
+
+  const now = performance.now();
+  if (fpsWindowStart === 0) {
+    fpsWindowStart = now;
+    framesInWindow = 1;
+  } else {
+    framesInWindow++;
+    const elapsed = now - fpsWindowStart;
+    if (elapsed >= 1000) {
+      rollingEffectiveFps = Math.round(((framesInWindow * 1000) / elapsed) * 10) / 10;
+      fpsWindowStart = now;
+      framesInWindow = 0;
+    }
+  }
 }
 
 /**
@@ -169,6 +310,7 @@ export async function getLivePoseLandmarker(): Promise<PoseLandmarker> {
         minPosePresenceConfidence: 0.45,
         minTrackingConfidence: 0.45,
       });
+      activeDelegate = "GPU";
       return landmarkerInstance;
     } catch (gpuErr) {
       console.warn("MediaPipe GPU initialization failed, attempting local CPU delegate:", gpuErr);
@@ -187,6 +329,7 @@ export async function getLivePoseLandmarker(): Promise<PoseLandmarker> {
         minPosePresenceConfidence: 0.45,
         minTrackingConfidence: 0.45,
       });
+      activeDelegate = "CPU";
       return landmarkerInstance;
     } catch (localCpuErr) {
       console.warn("MediaPipe local model failed, attempting CDN fallback:", localCpuErr);
@@ -205,6 +348,7 @@ export async function getLivePoseLandmarker(): Promise<PoseLandmarker> {
         minPosePresenceConfidence: 0.45,
         minTrackingConfidence: 0.45,
       });
+      activeDelegate = "CPU";
       return landmarkerInstance;
     } catch (cdnErr) {
       initializationPromise = null;
@@ -220,6 +364,11 @@ export async function getLivePoseLandmarker(): Promise<PoseLandmarker> {
 
 /**
  * Executes pose estimation on the current video frame and draws the skeleton overlay.
+ * Features:
+ * - Redundant frame skipping when video.currentTime has not advanced.
+ * - Measured execution latency & rolling effective inference FPS telemetry.
+ * - Adaptive Exponential Moving Average (EMA) landmark smoothing to eliminate jitter.
+ * - 1:1 canvas-to-native video aspect ratio scaling without distortion.
  */
 export function detectAndDrawPose(
   landmarker: PoseLandmarker,
@@ -251,6 +400,22 @@ export function detectAndDrawPose(
     canvas.height = video.videoHeight;
   }
 
+  // Optimize: Skip inference if video.currentTime has not changed (prevents redundant processing at 60Hz/120Hz)
+  if (
+    lastVideoTimeSec >= 0 &&
+    Math.abs(video.currentTime - lastVideoTimeSec) < 0.0001
+  ) {
+    skippedFramesCounter++;
+    if (!drawOverlay) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+    return {
+      result: lastResultCache,
+      metrics: lastMetricsCache ?? getEmptyLiveMetrics(),
+    };
+  }
+  lastVideoTimeSec = video.currentTime;
+
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   // Strictly increasing timestamp for MediaPipe VIDEO mode
@@ -258,24 +423,36 @@ export function detectAndDrawPose(
   lastVideoTimestamp = safeTimestampMs;
 
   let result: PoseLandmarkerResult | null = null;
+  const t0 = performance.now();
   try {
     result = landmarker.detectForVideo(video, safeTimestampMs);
   } catch (err) {
-    // Drop frame on timing error or WebGL context recovery
+    resetSmoothing();
+    lastResultCache = null;
+    lastMetricsCache = null;
     return {
       result: null,
       metrics: getEmptyLiveMetrics(),
     };
   }
+  const t1 = performance.now();
+  recordInferenceTelemetry(t1 - t0, video.videoWidth, video.videoHeight);
 
   if (!result || !result.landmarks || result.landmarks.length === 0) {
+    resetSmoothing();
+    lastResultCache = null;
+    lastMetricsCache = null;
     return {
       result,
       metrics: getEmptyLiveMetrics(),
     };
   }
 
-  const landmarks = result.landmarks[0];
+  // Apply adaptive EMA smoothing to stabilize landmark positions without latency
+  const rawLandmarks = result.landmarks[0];
+  const landmarks = smoothLandmarks(rawLandmarks);
+  result.landmarks[0] = landmarks;
+
   const w = canvas.width;
   const h = canvas.height;
 
@@ -370,6 +547,8 @@ export function detectAndDrawPose(
 
   // 3. Extract Real-Time Movement Observations
   const metrics = calculateLiveMetrics(landmarks);
+  lastResultCache = result;
+  lastMetricsCache = metrics;
 
   return { result, metrics };
 }
@@ -529,7 +708,9 @@ export function calculateLiveMetrics(landmarks: NormalizedLandmark[]): LiveJoint
  * Releases cached PoseLandmarker resources.
  */
 export function disposeLivePoseLandmarker(): void {
-  lastVideoTimestamp = -1;
+  resetPoseTimestamp();
+  resetPoseTelemetry();
+  activeDelegate = "uninitialized";
   if (landmarkerInstance) {
     try {
       landmarkerInstance.close();

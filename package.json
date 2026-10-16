@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "test": "node --experimental-strip-types --test test/screeningRules.test.ts test/movementFeatures.test.ts test/xrayAnalysis.test.ts",
+    "test": "node --experimental-strip-types --test test/screeningRules.test.ts test/movementFeatures.test.ts test/xrayAnalysis.test.ts test/movementChecklist.test.ts test/movementSessionStorage.test.ts test/poseOptimization.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -16,6 +16,7 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@types/node": "^26.6.5",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",

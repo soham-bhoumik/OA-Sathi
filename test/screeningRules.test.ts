@@ -1381,7 +1381,7 @@ describe("OA-Sathi Data Correctness & Integrity Test Suite", () => {
 
     // Mutate and save app settings
     saveAppSettings({
-      preferredLanguage: "bn",
+      preferredLanguage: "grt",
       defaultDistrict: "West Garo Hills",
       highContrastMode: true,
     });

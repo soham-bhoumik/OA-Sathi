@@ -191,7 +191,7 @@ export async function checkGaitServiceHealth(): Promise<{
     clearTimeout(timeoutId);
 
     if (res.ok) {
-      const data = await res.json();
+      const data = (await res.json()) as { modelReady?: boolean };
       return {
         isOnline: true,
         modelReady: Boolean(data.modelReady),

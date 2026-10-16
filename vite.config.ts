@@ -8,4 +8,7 @@ export default defineConfig({
       ignored: ["**/.venv/**", "**/backend/**"],
     },
   },
+  build: {
+    chunkSizeWarningLimit: 1000,
+  },
 });

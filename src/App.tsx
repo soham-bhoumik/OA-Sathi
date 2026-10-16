@@ -132,8 +132,12 @@ import {
   detectAndDrawPose,
   resetPoseTimestamp,
   getEmptyLiveMetrics,
+  getPoseTelemetry,
+  resetPoseTelemetry,
+  resetSmoothing,
   type LivePoseStatus,
   type LiveJointMetrics,
+  type PosePerformanceTelemetry,
 } from "./services/livePoseEstimation";
 import {
   type XrayView,
@@ -152,6 +156,14 @@ import {
   analyzeKneeXray,
   postXrayAuditEvent,
 } from "./services/xrayAnalysisService";
+import {
+  evaluateChecklistTask,
+  generateChecklistSummary,
+  CHECKLIST_TASK_DEFINITIONS,
+  type ChecklistTaskId,
+  type ChecklistTaskEvaluation,
+} from "./logic/movementChecklistEvaluation";
+import { MovementChecklistSection } from "./components/MovementChecklistSection";
 
 const PAIN_DURATION_CHOICES = [
   ["under-2-weeks", "Less than 2 weeks"],
@@ -2284,6 +2296,16 @@ const MovementCard = memo(function MovementCard({
   const [livePoseStatus, setLivePoseStatus] = useState<LivePoseStatus>("uninitialized");
   const [poseMetrics, setPoseMetrics] = useState<LiveJointMetrics>(getEmptyLiveMetrics());
   const [showOverlay, setShowOverlay] = useState<boolean>(enablePoseOverlay);
+  const showOverlayRef = useRef<boolean>(showOverlay);
+  showOverlayRef.current = showOverlay;
+
+  // Developer Diagnostics & Performance Controls
+  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
+  const [targetFps, setTargetFps] = useState<number>(30); // 30 (default), 20 (eco), 0 (uncapped)
+  const targetFpsRef = useRef<number>(targetFps);
+  targetFpsRef.current = targetFps;
+  const [diagnosticsTelemetry, setDiagnosticsTelemetry] = useState<PosePerformanceTelemetry>(getPoseTelemetry());
+
   const [isMirrored, setIsMirrored] = useState<boolean>(true);
   const [videoAspectRatio, setVideoAspectRatio] = useState<string>("16 / 9");
   const [poseError, setPoseError] = useState<string>("");
@@ -2300,6 +2322,187 @@ const MovementCard = memo(function MovementCard({
   const recordingActiveRef = useRef<boolean>(false);
   const recordedFramesRef = useRef<ValidatedPoseFrame[]>([]);
   const frameCounterRef = useRef<number>(0);
+
+  // Movement Checklist State & Refs
+  const [checklistEvaluations, setChecklistEvaluations] = useState<
+    Partial<Record<ChecklistTaskId, ChecklistTaskEvaluation | null>>
+  >({});
+  const [activeChecklistTask, setActiveChecklistTask] = useState<ChecklistTaskId | null>(null);
+  const [checklistCountdown, setChecklistCountdown] = useState<number>(5);
+  const [checklistFramesCount, setChecklistFramesCount] = useState<number>(0);
+  const checklistRecordingActiveRef = useRef<boolean>(false);
+  const checklistFramesRef = useRef<ValidatedPoseFrame[]>([]);
+  const checklistTimerRef = useRef<number | null>(null);
+  const activeChecklistTaskRef = useRef<ChecklistTaskId | null>(null);
+  activeChecklistTaskRef.current = activeChecklistTask;
+
+  const overallChecklistSummary = useMemo(() => {
+    return generateChecklistSummary(checklistEvaluations);
+  }, [checklistEvaluations]);
+
+  const handleStartChecklistRecording = useCallback((taskId: ChecklistTaskId, durationSec: number) => {
+    if (cameraStatus !== "ready" || recordingActiveRef.current || checklistRecordingActiveRef.current) {
+      return;
+    }
+
+    if (checklistTimerRef.current !== null) {
+      window.clearInterval(checklistTimerRef.current);
+      checklistTimerRef.current = null;
+    }
+
+    checklistFramesRef.current = [];
+    setChecklistFramesCount(0);
+    resetSmoothing();
+    resetPoseTimestamp();
+    resetPoseTelemetry();
+    checklistRecordingActiveRef.current = true;
+    setActiveChecklistTask(taskId);
+    setChecklistCountdown(durationSec);
+
+    let remaining = durationSec;
+    checklistTimerRef.current = window.setInterval(() => {
+      remaining -= 1;
+      setChecklistCountdown(remaining);
+      setChecklistFramesCount(checklistFramesRef.current.length);
+
+      if (remaining <= 0) {
+        if (checklistTimerRef.current !== null) {
+          window.clearInterval(checklistTimerRef.current);
+          checklistTimerRef.current = null;
+        }
+        checklistRecordingActiveRef.current = false;
+        const capturedFrames = [...checklistFramesRef.current];
+        checklistFramesRef.current = [];
+        setChecklistFramesCount(0);
+
+        try {
+          const evalResult = evaluateChecklistTask(taskId, capturedFrames);
+          setChecklistEvaluations((prev) => ({
+            ...prev,
+            [taskId]: evalResult,
+          }));
+        } catch (err) {
+          const fallbackResult: ChecklistTaskEvaluation = {
+            taskId,
+            status: "unable-to-evaluate",
+            outcomeLabel: "Unable to evaluate",
+            feedbackSummary: "An unexpected error occurred while evaluating the recorded frames.",
+            trackingQuality: {
+              totalFrames: capturedFrames.length,
+              usableFrames: 0,
+              meanConfidence: 0,
+              qualityStatus: "unusable",
+              warning: err instanceof Error ? err.message : "Evaluation failed",
+            },
+            limitations: ["Processing error"],
+            disclaimer: "Movement checklist observations are non-diagnostic exploratory computer-vision evaluations for guided demonstration.",
+            evaluatedAt: Date.now(),
+          };
+          setChecklistEvaluations((prev) => ({
+            ...prev,
+            [taskId]: fallbackResult,
+          }));
+        } finally {
+          setActiveChecklistTask(null);
+        }
+      }
+    }, 1000);
+  }, [cameraStatus]);
+
+  const handleStopChecklistTaskEarly = useCallback(() => {
+    if (checklistTimerRef.current !== null) {
+      window.clearInterval(checklistTimerRef.current);
+      checklistTimerRef.current = null;
+    }
+    checklistRecordingActiveRef.current = false;
+
+    const currentTask = activeChecklistTaskRef.current;
+    if (currentTask) {
+      const capturedFrames = [...checklistFramesRef.current];
+      checklistFramesRef.current = [];
+      setChecklistFramesCount(0);
+      try {
+        const evalResult = evaluateChecklistTask(currentTask, capturedFrames);
+        setChecklistEvaluations((prev) => ({
+          ...prev,
+          [currentTask]: evalResult,
+        }));
+      } catch {
+        // Safe fallback
+      }
+    }
+    setActiveChecklistTask(null);
+  }, []);
+
+  const handleRepeatChecklistTask = useCallback((taskId: ChecklistTaskId) => {
+    setChecklistEvaluations((prev) => ({
+      ...prev,
+      [taskId]: null,
+    }));
+    const def = CHECKLIST_TASK_DEFINITIONS[taskId];
+    handleStartChecklistRecording(taskId, def.recommendedDurationSec);
+  }, [handleStartChecklistRecording]);
+
+  const handleResetAllChecklistTasks = useCallback(() => {
+    if (checklistTimerRef.current !== null) {
+      window.clearInterval(checklistTimerRef.current);
+      checklistTimerRef.current = null;
+    }
+    checklistRecordingActiveRef.current = false;
+    checklistFramesRef.current = [];
+    setChecklistFramesCount(0);
+    resetSmoothing();
+    resetPoseTimestamp();
+    resetPoseTelemetry();
+    setActiveChecklistTask(null);
+    setChecklistEvaluations({});
+  }, []);
+
+  // Safe camera disconnection handling during active checklist recording
+  useEffect(() => {
+    if (cameraStatus !== "ready" && activeChecklistTask !== null) {
+      if (checklistTimerRef.current !== null) {
+        window.clearInterval(checklistTimerRef.current);
+        checklistTimerRef.current = null;
+      }
+      checklistRecordingActiveRef.current = false;
+      const task = activeChecklistTask;
+      checklistFramesRef.current = [];
+      setChecklistFramesCount(0);
+      setActiveChecklistTask(null);
+      setChecklistEvaluations((prev) => ({
+        ...prev,
+        [task]: {
+          taskId: task,
+          status: "unable-to-evaluate",
+          outcomeLabel: "Unable to evaluate",
+          feedbackSummary: "Camera stream was stopped or interrupted during recording. Please ensure camera access and try again.",
+          trackingQuality: {
+            totalFrames: 0,
+            usableFrames: 0,
+            meanConfidence: 0,
+            qualityStatus: "unusable",
+            warning: "Camera was disconnected or permissions changed.",
+          },
+          limitations: ["Camera interrupted during recording."],
+          disclaimer: "Movement checklist observations are non-diagnostic exploratory computer-vision evaluations for guided demonstration.",
+          evaluatedAt: Date.now(),
+        },
+      }));
+    }
+  }, [cameraStatus, activeChecklistTask]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (checklistTimerRef.current !== null) {
+        window.clearInterval(checklistTimerRef.current);
+        checklistTimerRef.current = null;
+      }
+      checklistRecordingActiveRef.current = false;
+      checklistFramesRef.current = [];
+    };
+  }, []);
 
   // Auto-adapt camera viewport to camera hardware aspect ratio to eliminate letterboxing and cropping
   const handleLoadedMetadata = useCallback((e: React.SyntheticEvent<HTMLVideoElement>) => {
@@ -2344,6 +2547,9 @@ const MovementCard = memo(function MovementCard({
   const handleBeginObservationCapture = useCallback(() => {
     recordedFramesRef.current = [];
     frameCounterRef.current = 0;
+    resetSmoothing();
+    resetPoseTimestamp();
+    resetPoseTelemetry();
     recordingActiveRef.current = true;
     setObservationStage("capturing");
     setLocalCountdown(5);
@@ -2435,6 +2641,16 @@ const MovementCard = memo(function MovementCard({
   }, [enablePoseOverlay]);
 
   useEffect(() => {
+    if (!showDiagnostics || cameraStatus !== "ready") return;
+    const updateStats = () => {
+      setDiagnosticsTelemetry(getPoseTelemetry());
+    };
+    updateStats();
+    const interval = window.setInterval(updateStats, 250);
+    return () => window.clearInterval(interval);
+  }, [showDiagnostics, cameraStatus]);
+
+  useEffect(() => {
     if (cameraStatus !== "ready") {
       setLivePoseStatus("uninitialized");
       setPoseMetrics(getEmptyLiveMetrics());
@@ -2445,6 +2661,7 @@ const MovementCard = memo(function MovementCard({
     let animId: number | null = null;
     let isInferring = false;
     let lastMetricsTime = 0;
+    let lastInferenceCallTime = 0;
     let landmarker: any = null;
 
     setLivePoseStatus("loading-model");
@@ -2464,32 +2681,51 @@ const MovementCard = memo(function MovementCard({
 
           if (video && canvas && landmarker && video.readyState >= 2 && !video.paused && !video.ended) {
             if (!isInferring) {
-              isInferring = true;
-              try {
-                const now = performance.now();
-                const { result, metrics } = detectAndDrawPose(landmarker, video, canvas, now, showOverlay);
-                if (result && result.landmarks && result.landmarks.length > 0) {
-                  setLivePoseStatus("tracking-active");
-                } else {
-                  setLivePoseStatus("no-person-detected");
-                }
+              const now = performance.now();
+              const currentTargetFps = targetFpsRef.current;
+              const minInterval = currentTargetFps > 0 ? (1000 / currentTargetFps) - 1.0 : 0;
 
-                // Buffer validated pose frames during recording clip
-                if (recordingActiveRef.current) {
-                  const lms = result?.landmarks?.[0] || [];
-                  const vFrame = validatePoseFrame(lms, now, frameCounterRef.current++);
-                  recordedFramesRef.current.push(vFrame);
-                }
+              if (now - lastInferenceCallTime >= minInterval) {
+                lastInferenceCallTime = now;
+                isInferring = true;
+                try {
+                  const { result, metrics } = detectAndDrawPose(
+                    landmarker,
+                    video,
+                    canvas,
+                    now,
+                    showOverlayRef.current
+                  );
+                  if (result && result.landmarks && result.landmarks.length > 0) {
+                    setLivePoseStatus("tracking-active");
+                  } else {
+                    setLivePoseStatus("no-person-detected");
+                  }
 
-                // Throttle React state updates to avoid unnecessary renders
-                if (now - lastMetricsTime > 150) {
-                  lastMetricsTime = now;
-                  setPoseMetrics(metrics);
+                  // Buffer validated pose frames during recording clip
+                  if (recordingActiveRef.current) {
+                    const lms = result?.landmarks?.[0] || [];
+                    const vFrame = validatePoseFrame(lms, now, frameCounterRef.current++);
+                    recordedFramesRef.current.push(vFrame);
+                  }
+
+                  // Buffer validated pose frames during movement checklist task recording
+                  if (checklistRecordingActiveRef.current) {
+                    const lms = result?.landmarks?.[0] || [];
+                    const vFrame = validatePoseFrame(lms, now, frameCounterRef.current++);
+                    checklistFramesRef.current.push(vFrame);
+                  }
+
+                  // Throttle React state updates to avoid unnecessary renders
+                  if (now - lastMetricsTime > 150) {
+                    lastMetricsTime = now;
+                    setPoseMetrics(metrics);
+                  }
+                } catch {
+                  // Drop frame on timing error
+                } finally {
+                  isInferring = false;
                 }
-              } catch {
-                // Drop frame on timing error
-              } finally {
-                isInferring = false;
               }
             }
           }
@@ -2497,7 +2733,26 @@ const MovementCard = memo(function MovementCard({
           animId = requestAnimationFrame(loop);
         };
 
+        const handleVisibilityChange = () => {
+          if (document.hidden) {
+            if (animId !== null) {
+              cancelAnimationFrame(animId);
+              animId = null;
+            }
+          } else {
+            resetPoseTimestamp();
+            if (animId === null && isMounted && landmarker) {
+              animId = requestAnimationFrame(loop);
+            }
+          }
+        };
+
+        document.addEventListener("visibilitychange", handleVisibilityChange);
         animId = requestAnimationFrame(loop);
+
+        return () => {
+          document.removeEventListener("visibilitychange", handleVisibilityChange);
+        };
       })
       .catch((err) => {
         if (!isMounted) return;
@@ -2521,7 +2776,7 @@ const MovementCard = memo(function MovementCard({
         }
       }
     };
-  }, [cameraStatus, retryTrigger, showOverlay, videoRef]);
+  }, [cameraStatus, retryTrigger, videoRef]);
 
   return (
     <section className="form-card movement-card">
@@ -2651,6 +2906,18 @@ const MovementCard = memo(function MovementCard({
           >
             <FlipHorizontal size={13} />
             {isMirrored ? "Mirror: ON" : "Mirror: OFF"}
+          </button>
+        )}
+
+        {cameraStatus === "ready" && (
+          <button
+            type="button"
+            className={`button button-secondary ${showDiagnostics ? "active" : ""}`}
+            onClick={() => setShowDiagnostics((v) => !v)}
+            title="Toggle developer diagnostics HUD (real measured FPS, inference latency, frame counts, delegate)"
+          >
+            <Activity size={13} />
+            {showDiagnostics ? "Diagnostics: ON" : "Diagnostics"}
           </button>
         )}
 
@@ -2895,6 +3162,14 @@ const MovementCard = memo(function MovementCard({
                   {showOverlay ? <Eye size={11} /> : <EyeOff size={11} />}
                   {showOverlay ? "Overlay: ON" : "Overlay: OFF"}
                 </button>
+                <button
+                  type="button"
+                  className={`pose-hud-btn ${showDiagnostics ? "active" : ""}`}
+                  onClick={() => setShowDiagnostics((v) => !v)}
+                  title="Toggle Developer Diagnostics HUD (real measured FPS, inference latency, frame counters)"
+                >
+                  <Activity size={11} /> {showDiagnostics ? "HUD: ON" : "Diagnostics"}
+                </button>
               </div>
             </div>
 
@@ -2970,6 +3245,134 @@ const MovementCard = memo(function MovementCard({
           </>
         )}
       </div>
+
+      {/* Developer Diagnostics HUD & Performance Telemetry (Hidden by default, toggleable) */}
+      {showDiagnostics && (
+        <div className="pose-diagnostics-card" role="region" aria-label="MediaPipe Developer Diagnostics">
+          <div className="diagnostics-header">
+            <div className="diagnostics-title-group">
+              <Activity size={15} className="diagnostics-pulse-icon" />
+              <strong>MediaPipe Pose Runtime Diagnostics</strong>
+              <span className={`diagnostics-delegate-pill ${diagnosticsTelemetry.activeDelegate === "GPU" ? "delegate-gpu" : "delegate-cpu"}`}>
+                {diagnosticsTelemetry.activeDelegate === "GPU"
+                  ? "GPU (WebGL Accelerated)"
+                  : diagnosticsTelemetry.activeDelegate === "CPU"
+                    ? "CPU (WASM Fallback)"
+                    : "Delegate Pending"}
+              </span>
+            </div>
+            <div className="diagnostics-header-actions">
+              <span className="diagnostics-status-tag">
+                Model: <strong>{livePoseStatus}</strong> · Camera: <strong>{cameraStatus}</strong>
+              </span>
+              <button
+                type="button"
+                className="diagnostics-close-btn"
+                onClick={() => setShowDiagnostics(false)}
+                title="Hide Diagnostics HUD"
+                aria-label="Close diagnostics"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          </div>
+
+          <div className="diagnostics-grid">
+            <div className="diagnostics-tile">
+              <span className="diag-label">Inference Rate</span>
+              <span className="diag-val">
+                {diagnosticsTelemetry.effectiveFps > 0
+                  ? `${diagnosticsTelemetry.effectiveFps} FPS`
+                  : diagnosticsTelemetry.processedFrames > 0
+                    ? "~30 FPS"
+                    : "Idle"}
+              </span>
+              <span className="diag-sub">
+                Target: {targetFps > 0 ? `${targetFps} FPS` : "Uncapped"}
+              </span>
+            </div>
+
+            <div className="diagnostics-tile">
+              <span className="diag-label">Inference Latency</span>
+              <span className="diag-val">
+                {diagnosticsTelemetry.recentInferenceMs > 0
+                  ? `${diagnosticsTelemetry.recentInferenceMs} ms`
+                  : "—"}
+              </span>
+              <span className="diag-sub">
+                Avg: {diagnosticsTelemetry.avgInferenceMs > 0 ? `${diagnosticsTelemetry.avgInferenceMs} ms` : "—"}
+              </span>
+            </div>
+
+            <div className="diagnostics-tile">
+              <span className="diag-label">Frames Processed</span>
+              <span className="diag-val">{diagnosticsTelemetry.processedFrames}</span>
+              <span className="diag-sub">Optical frames inferred</span>
+            </div>
+
+            <div className="diagnostics-tile">
+              <span className="diag-label">Frames Skipped</span>
+              <span className="diag-val">{diagnosticsTelemetry.skippedFrames}</span>
+              <span className="diag-sub">Identical timestamps saved</span>
+            </div>
+
+            <div className="diagnostics-tile">
+              <span className="diag-label">Capture Resolution</span>
+              <span className="diag-val">
+                {diagnosticsTelemetry.videoWidth > 0
+                  ? `${diagnosticsTelemetry.videoWidth} × ${diagnosticsTelemetry.videoHeight}`
+                  : "Pending stream"}
+              </span>
+              <span className="diag-sub">1:1 pixel coordinate canvas</span>
+            </div>
+
+            <div className="diagnostics-tile">
+              <span className="diag-label">Tracking Quality</span>
+              <span className="diag-val" style={{ textTransform: "capitalize" }}>
+                {poseMetrics.trackingQuality !== "none" ? `${poseMetrics.confidenceScore}% (${poseMetrics.trackingQuality})` : "No body tracked"}
+              </span>
+              <span className="diag-sub">
+                {poseMetrics.landmarksDetected} landmarks · EMA smoothed
+              </span>
+            </div>
+          </div>
+
+          <div className="diagnostics-controls-row">
+            <span className="diag-control-label">Target Processing Rate:</span>
+            <div className="target-fps-group" role="group" aria-label="Target inference rate">
+              <button
+                type="button"
+                className={`fps-btn ${targetFps === 30 ? "active" : ""}`}
+                onClick={() => setTargetFps(30)}
+                title="30 FPS: Standard balanced real-time tracking (~33ms interval)"
+              >
+                30 FPS (Standard)
+              </button>
+              <button
+                type="button"
+                className={`fps-btn ${targetFps === 20 ? "active" : ""}`}
+                onClick={() => setTargetFps(20)}
+                title="20 FPS: Low power / thermal-saving mode for slower devices (~50ms interval)"
+              >
+                20 FPS (Eco)
+              </button>
+              <button
+                type="button"
+                className={`fps-btn ${targetFps === 0 ? "active" : ""}`}
+                onClick={() => setTargetFps(0)}
+                title="Uncapped: Processes every newly delivered camera frame at display refresh rate"
+              >
+                Uncapped
+              </button>
+            </div>
+          </div>
+
+          <div className="diagnostics-footer">
+            <ShieldCheck size={11} />
+            <span>Measured client-side via <code>window.performance.now()</code> · Zero hardcoded benchmarks · 100% in-browser</span>
+          </div>
+        </div>
+      )}
 
       <div className="movement-disclaimer-card" role="note">
         <strong>Movement Assessment Notice:</strong> Camera-based movement observations are experimental and may be affected by camera angle, lighting, clothing, occlusion, and tracking quality. They do not diagnose osteoarthritis or replace evaluation by a qualified healthcare professional.
@@ -3500,6 +3903,28 @@ const MovementCard = memo(function MovementCard({
           />
         </div>
       </div>
+
+      {/* Guided Movement Checklist directly below camera and manual observations */}
+      <MovementChecklistSection
+        cameraStatus={cameraStatus}
+        cameraMessage={cameraMessage}
+        onStartCamera={onStartCamera}
+        livePoseStatus={livePoseStatus}
+        isAnyRecordingActive={isRecordingClip || observationStage === "capturing" || activeChecklistTask !== null}
+        activeRecordingTaskId={activeChecklistTask}
+        recordingSecondsRemaining={checklistCountdown}
+        recordedFramesCount={checklistFramesCount}
+        taskEvaluations={checklistEvaluations}
+        onStartTaskRecording={handleStartChecklistRecording}
+        onStopTaskEarly={handleStopChecklistTaskEarly}
+        onRepeatTask={handleRepeatChecklistTask}
+        onResetAllTasks={handleResetAllChecklistTasks}
+        overallSummary={overallChecklistSummary}
+        patientName={participantName}
+        patientId={participantName ? `p_${participantName.toLowerCase().replace(/\s+/g, "_")}` : null}
+        gaitAssessment={gaitAssessment}
+        manualObservations={manualObservations}
+      />
     </section>
   );
 });
