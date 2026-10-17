@@ -86,6 +86,7 @@ import {
   requestConsultation,
   recordDoctorReview,
   calculateBMI,
+  determineCautiousScreeningCategory,
   type FormValues,
   type Joint,
   type Page,
@@ -95,6 +96,7 @@ import {
   type ConsultationStatus,
   type FollowUpRecommendation,
   type DoctorReviewInput,
+  type CautiousScreeningSynthesis,
   NOT_CHECKED,
   PREFER_NOT_TO_ANSWER,
   DURATION_LABELS,
@@ -162,6 +164,7 @@ import {
   evaluateChecklistTask,
   generateChecklistSummary,
   CHECKLIST_TASK_DEFINITIONS,
+  generateSymptomConditionedInterpretation,
   type ChecklistTaskId,
   type ChecklistTaskEvaluation,
 } from "./logic/movementChecklistEvaluation";
@@ -227,6 +230,9 @@ function App() {
   const [isRecordingClip, setIsRecordingClip] = useState(false);
   const [recordingCountDown, setRecordingCountDown] = useState(5);
   const [isAnalyzingGait, setIsAnalyzingGait] = useState(false);
+  const [checklistEvaluations, setChecklistEvaluations] = useState<
+    Partial<Record<ChecklistTaskId, ChecklistTaskEvaluation | null>>
+  >({});
   const [activeReportRecord, setActiveReportRecord] = useState<Screening | null>(null);
 
   const authorizedScreenings = useMemo(() => {
@@ -618,6 +624,7 @@ function App() {
     setForm(initialForm);
     setGaitAssessment(null);
     setManualObservations({ ...DEFAULT_MANUAL_OBSERVATIONS });
+    setChecklistEvaluations({});
     setConsent(false);
     setError("");
     setNotice("");
@@ -637,6 +644,7 @@ function App() {
       setForm(initialForm);
       setGaitAssessment(null);
       setManualObservations({ ...DEFAULT_MANUAL_OBSERVATIONS });
+      setChecklistEvaluations({});
       setConsent(false);
     }
     navigate("screening");
@@ -672,6 +680,7 @@ function App() {
       }
       setGaitAssessment(recordToEdit.gaitAssessment || null);
       setManualObservations(recordToEdit.manualGaitObservations || { ...DEFAULT_MANUAL_OBSERVATIONS });
+      setChecklistEvaluations(recordToEdit.movementChecklist || {});
       setEditingRecordId(recordToEdit.id);
       setConsent(true);
       setResult(null);
@@ -696,7 +705,7 @@ function App() {
       setIsSubmitting(true);
       stopCamera();
 
-      const evaluation = evaluateScreening(form);
+      const evaluation = evaluateScreening(form, checklistEvaluations, gaitAssessment, manualObservations);
       const now = new Date();
       const timeFormatter = new Intl.DateTimeFormat("en-IN", { timeStyle: "short" });
       const ageNum = Number(form.age);
@@ -728,6 +737,8 @@ function App() {
           totalQuestions: evaluation.totalQuestions,
           bmi: evaluation.bmi,
           urgentCareNotice: evaluation.urgentCareNotice,
+          cautiousSynthesis: evaluation.cautiousSynthesis,
+          movementChecklist: checklistEvaluations,
           gaitAssessment: gaitAssessment || existing?.gaitAssessment || undefined,
           manualGaitObservations: manualObservations || existing?.manualGaitObservations,
           sharingStatus: existing?.sharingStatus || "not-shared",
@@ -777,6 +788,8 @@ function App() {
           totalQuestions: evaluation.totalQuestions,
           bmi: evaluation.bmi,
           urgentCareNotice: evaluation.urgentCareNotice,
+          cautiousSynthesis: evaluation.cautiousSynthesis,
+          movementChecklist: checklistEvaluations,
           gaitAssessment: gaitAssessment || undefined,
           manualGaitObservations: manualObservations,
           sharingStatus: "not-shared",
@@ -795,7 +808,7 @@ function App() {
 
       setIsSubmitting(false);
     },
-    [consent, editingRecordId, form, gaitAssessment, isSubmitting, manualObservations, screenings, stopCamera]
+    [checklistEvaluations, consent, editingRecordId, form, gaitAssessment, isSubmitting, manualObservations, screenings, stopCamera]
   );
 
   const handleOpenMedicalReport = useCallback((record: Screening) => {
@@ -866,7 +879,7 @@ function App() {
 
   const exportSummary = useCallback(() => {
     if (!result) return;
-    const text = [
+    const lines = [
       "OA-Sathi — Screening summary",
       `Reference: ${result.id}`,
       `Profile: ${result.name}`,
@@ -874,9 +887,24 @@ function App() {
       `District: ${result.district}`,
       `Joint: ${result.joint}`,
       `Screening markers: ${result.band} (${result.score}/100 demo score)`,
+    ];
+
+    if (result.cautiousSynthesis) {
+      lines.push(
+        `Cautious Category: ${result.cautiousSynthesis.categoryLabel}`,
+        `Movement Observation: ${result.cautiousSynthesis.movementObservation}`,
+        `Reference Comparison: ${result.cautiousSynthesis.referenceComparison}`,
+        `Symptom Screening: ${result.cautiousSynthesis.symptomScreening}`,
+        `Screening Outcome: ${result.cautiousSynthesis.screeningOutcome}`
+      );
+    }
+
+    lines.push(
       "",
-      "This illustrative screening aid is not a diagnosis or a validated clinical prediction. Please consult a qualified health professional for assessment.",
-    ].join("\n");
+      "This illustrative screening aid is not a diagnosis or a validated clinical prediction. Please consult a qualified health professional for assessment."
+    );
+
+    const text = lines.join("\n");
 
     const link = document.createElement("a");
     const downloadUrl = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
@@ -1122,6 +1150,8 @@ function App() {
             onClearGait={handleClearGaitAssessment}
             onLiveClipRecorded={handleLiveClipRecorded}
             onCommitObservation={setGaitAssessment}
+            checklistEvaluations={checklistEvaluations}
+            onChecklistEvaluationsChange={setChecklistEvaluations}
           />
         )}
         {page === "records" && (
@@ -1604,6 +1634,8 @@ const ScreeningPage = memo(function ScreeningPage({
   onClearGait,
   onLiveClipRecorded,
   onCommitObservation,
+  checklistEvaluations,
+  onChecklistEvaluationsChange,
 }: {
   form: FormValues;
   result: Screening | null;
@@ -1639,6 +1671,8 @@ const ScreeningPage = memo(function ScreeningPage({
   onClearGait: () => void;
   onLiveClipRecorded?: (frames: ValidatedPoseFrame[]) => void;
   onCommitObservation?: (observation: StructuredGaitAnalysisOutput) => void;
+  checklistEvaluations?: Partial<Record<ChecklistTaskId, ChecklistTaskEvaluation | null>>;
+  onChecklistEvaluationsChange?: (evaluations: Partial<Record<ChecklistTaskId, ChecklistTaskEvaluation | null>>) => void;
 }) {
   const [regionalLang, setRegionalLang] = useState<NERLanguageCode>(preferredLanguage || "en");
   useEffect(() => {
@@ -1671,6 +1705,29 @@ const ScreeningPage = memo(function ScreeningPage({
       Number(form.painLevel) >= 9
     );
   }, [form.hasHotRedJointFever, form.hasSuddenSeverePainSwelling, form.hasInabilityToBearWeight, form.painLevel]);
+
+  const symptomsReported = useMemo(() => {
+    const painNum = Number(form.painLevel);
+    return Boolean(
+      (Number.isFinite(painNum) && painNum >= 3) ||
+      (form.painDuration && form.painDuration !== "under-2-weeks" && form.painDuration !== NOT_CHECKED) ||
+      (form.stiffness && form.stiffness !== "none" && form.stiffness !== NOT_CHECKED) ||
+      (form.mobility && form.mobility !== "no" && form.mobility !== NOT_CHECKED) ||
+      form.previousInjury === true ||
+      form.familyHistory === true ||
+      form.repeatedLoad === true ||
+      hasSafetyRedFlag
+    );
+  }, [
+    form.painLevel,
+    form.painDuration,
+    form.stiffness,
+    form.mobility,
+    form.previousInjury,
+    form.familyHistory,
+    form.repeatedLoad,
+    hasSafetyRedFlag,
+  ]);
 
   const unassessedCount = useMemo(() => {
     let count = 0;
@@ -2157,6 +2214,9 @@ const ScreeningPage = memo(function ScreeningPage({
               onLiveClipRecorded={onLiveClipRecorded}
               onCommitObservation={onCommitObservation}
               participantName={form.name}
+              taskEvaluations={checklistEvaluations}
+              onTaskEvaluationsChange={onChecklistEvaluationsChange}
+              symptomsReported={symptomsReported}
             />
 
             <div className="review-panel">
@@ -2273,6 +2333,9 @@ const MovementCard = memo(function MovementCard({
   onLiveClipRecorded,
   onCommitObservation,
   participantName,
+  taskEvaluations,
+  onTaskEvaluationsChange,
+  symptomsReported,
 }: {
   cameraStatus: "idle" | "requesting" | "ready" | "unsupported" | "denied" | "error";
   cameraMessage: string;
@@ -2292,6 +2355,9 @@ const MovementCard = memo(function MovementCard({
   onLiveClipRecorded?: (frames: ValidatedPoseFrame[]) => void;
   onCommitObservation?: (observation: StructuredGaitAnalysisOutput) => void;
   participantName?: string;
+  taskEvaluations?: Partial<Record<ChecklistTaskId, ChecklistTaskEvaluation | null>>;
+  onTaskEvaluationsChange?: (evaluations: Partial<Record<ChecklistTaskId, ChecklistTaskEvaluation | null>>) => void;
+  symptomsReported?: boolean;
 }) {
   const gaitStatus = getGaitAnalysisStatus(cameraStatus === "ready", gaitAssessment);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -2329,7 +2395,33 @@ const MovementCard = memo(function MovementCard({
   // Movement Checklist State & Refs
   const [checklistEvaluations, setChecklistEvaluations] = useState<
     Partial<Record<ChecklistTaskId, ChecklistTaskEvaluation | null>>
-  >({});
+  >(taskEvaluations || {});
+
+  useEffect(() => {
+    if (taskEvaluations !== undefined) {
+      setChecklistEvaluations(taskEvaluations);
+    }
+  }, [taskEvaluations]);
+
+  const updateChecklistEvaluations = useCallback(
+    (
+      updater:
+        | Partial<Record<ChecklistTaskId, ChecklistTaskEvaluation | null>>
+        | ((
+            prev: Partial<Record<ChecklistTaskId, ChecklistTaskEvaluation | null>>
+          ) => Partial<Record<ChecklistTaskId, ChecklistTaskEvaluation | null>>)
+    ) => {
+      setChecklistEvaluations((prev) => {
+        const next = typeof updater === "function" ? updater(prev) : updater;
+        if (onTaskEvaluationsChange) {
+          onTaskEvaluationsChange(next);
+        }
+        return next;
+      });
+    },
+    [onTaskEvaluationsChange]
+  );
+
   const [activeChecklistTask, setActiveChecklistTask] = useState<ChecklistTaskId | null>(null);
   const [checklistCountdown, setChecklistCountdown] = useState<number>(5);
   const [checklistFramesCount, setChecklistFramesCount] = useState<number>(0);
@@ -2380,7 +2472,7 @@ const MovementCard = memo(function MovementCard({
 
         try {
           const evalResult = evaluateChecklistTask(taskId, capturedFrames);
-          setChecklistEvaluations((prev) => ({
+          updateChecklistEvaluations((prev) => ({
             ...prev,
             [taskId]: evalResult,
           }));
@@ -2401,7 +2493,7 @@ const MovementCard = memo(function MovementCard({
             disclaimer: "Movement checklist observations are non-diagnostic exploratory computer-vision evaluations for guided demonstration.",
             evaluatedAt: Date.now(),
           };
-          setChecklistEvaluations((prev) => ({
+          updateChecklistEvaluations((prev) => ({
             ...prev,
             [taskId]: fallbackResult,
           }));
@@ -2410,7 +2502,7 @@ const MovementCard = memo(function MovementCard({
         }
       }
     }, 1000);
-  }, [cameraStatus]);
+  }, [cameraStatus, updateChecklistEvaluations]);
 
   const handleStopChecklistTaskEarly = useCallback(() => {
     if (checklistTimerRef.current !== null) {
@@ -2426,7 +2518,7 @@ const MovementCard = memo(function MovementCard({
       setChecklistFramesCount(0);
       try {
         const evalResult = evaluateChecklistTask(currentTask, capturedFrames);
-        setChecklistEvaluations((prev) => ({
+        updateChecklistEvaluations((prev) => ({
           ...prev,
           [currentTask]: evalResult,
         }));
@@ -2435,16 +2527,16 @@ const MovementCard = memo(function MovementCard({
       }
     }
     setActiveChecklistTask(null);
-  }, []);
+  }, [updateChecklistEvaluations]);
 
   const handleRepeatChecklistTask = useCallback((taskId: ChecklistTaskId) => {
-    setChecklistEvaluations((prev) => ({
+    updateChecklistEvaluations((prev) => ({
       ...prev,
       [taskId]: null,
     }));
     const def = CHECKLIST_TASK_DEFINITIONS[taskId];
     handleStartChecklistRecording(taskId, def.recommendedDurationSec);
-  }, [handleStartChecklistRecording]);
+  }, [handleStartChecklistRecording, updateChecklistEvaluations]);
 
   const handleResetAllChecklistTasks = useCallback(() => {
     if (checklistTimerRef.current !== null) {
@@ -2458,8 +2550,8 @@ const MovementCard = memo(function MovementCard({
     resetPoseTimestamp();
     resetPoseTelemetry();
     setActiveChecklistTask(null);
-    setChecklistEvaluations({});
-  }, []);
+    updateChecklistEvaluations({});
+  }, [updateChecklistEvaluations]);
 
   // Safe camera disconnection handling during active checklist recording
   useEffect(() => {
@@ -2473,7 +2565,7 @@ const MovementCard = memo(function MovementCard({
       checklistFramesRef.current = [];
       setChecklistFramesCount(0);
       setActiveChecklistTask(null);
-      setChecklistEvaluations((prev) => ({
+      updateChecklistEvaluations((prev) => ({
         ...prev,
         [task]: {
           taskId: task,
@@ -2493,7 +2585,7 @@ const MovementCard = memo(function MovementCard({
         },
       }));
     }
-  }, [cameraStatus, activeChecklistTask]);
+  }, [cameraStatus, activeChecklistTask, updateChecklistEvaluations]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -4002,6 +4094,7 @@ const MovementCard = memo(function MovementCard({
         patientId={participantName ? `p_${participantName.toLowerCase().replace(/\s+/g, "_")}` : null}
         gaitAssessment={gaitAssessment}
         manualObservations={manualObservations}
+        symptomsReported={symptomsReported}
       />
     </section>
   );
@@ -4194,6 +4287,22 @@ const ResultSummary = memo(function ResultSummary({
   const aiMeta = getAIModelMetadata();
   const [isActionPending, setIsActionPending] = useState(false);
 
+  const synthesis: CautiousScreeningSynthesis = useMemo(() => {
+    return (
+      result.cautiousSynthesis ||
+      determineCautiousScreeningCategory(
+        result.formAnswers || {
+          age: String(result.age),
+          joint: result.joint,
+          district: result.district,
+        },
+        result.movementChecklist || null,
+        result.gaitAssessment || null,
+        result.manualGaitObservations || null
+      )
+    );
+  }, [result]);
+
   const handleShareClick = () => {
     if (isActionPending) return;
     setIsActionPending(true);
@@ -4351,6 +4460,187 @@ const ResultSummary = memo(function ResultSummary({
                 worsens, or affects daily life.
               </p>
             </div>
+          </div>
+        </section>
+
+        {/* Cautious Movement & Screening Synthesis Card */}
+        <section className="result-card explanation-card" style={{ marginTop: "12px" }}>
+          <div className="result-section-title">
+            <span className="result-ai-icon">
+              <ShieldCheck size={16} />
+            </span>
+            <div>
+              <span className="eyebrow">NON-DIAGNOSTIC EVIDENCE SYNTHESIS</span>
+              <h3>Movement Angles &amp; Screening Synthesis</h3>
+            </div>
+          </div>
+
+          <div
+            style={{
+              padding: "14px 16px",
+              borderRadius: "10px",
+              border:
+                synthesis.category === "no-obvious-limitation-observed"
+                  ? "2px solid #86efac"
+                  : synthesis.category === "further-assessment-may-be-helpful"
+                    ? "2px solid #93c5fd"
+                    : synthesis.category === "assessment-incomplete"
+                      ? "2px solid #fde68a"
+                      : "2px solid #cbd5e1",
+              background:
+                synthesis.category === "no-obvious-limitation-observed"
+                  ? "#f0fdf4"
+                  : synthesis.category === "further-assessment-may-be-helpful"
+                    ? "#eff6ff"
+                    : synthesis.category === "assessment-incomplete"
+                      ? "#fffbeb"
+                      : "#f8fafc",
+              color:
+                synthesis.category === "no-obvious-limitation-observed"
+                  ? "#166534"
+                  : synthesis.category === "further-assessment-may-be-helpful"
+                    ? "#1e40af"
+                    : synthesis.category === "assessment-incomplete"
+                      ? "#92400e"
+                      : "#334155",
+              marginBottom: "14px",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px", marginBottom: "6px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: 700, fontSize: "13px" }}>
+                {synthesis.category === "no-obvious-limitation-observed" ? (
+                  <CheckCircle2 size={18} color="#16a34a" />
+                ) : synthesis.category === "further-assessment-may-be-helpful" ? (
+                  <Activity size={18} color="#2563eb" />
+                ) : (
+                  <AlertCircle size={18} color="#d97706" />
+                )}
+                <span>{synthesis.categoryLabel}</span>
+              </div>
+              <span style={{ fontSize: "10px", padding: "3px 8px", borderRadius: "12px", background: "rgba(0,0,0,0.06)", fontWeight: 600 }}>
+                Screening Status
+              </span>
+            </div>
+            <p style={{ margin: "4px 0 0", fontSize: "12px", lineHeight: "1.5" }}>
+              {synthesis.summary}
+            </p>
+          </div>
+
+          <p className="explanation-intro" style={{ marginBottom: "12px" }}>
+            The system separates movement angles from OA risk, ensuring that normal ranges do not prematurely rule out OA, and measurements outside reference ranges indicate mobility limitation or variability rather than disease confirmation.
+          </p>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "10px", marginBottom: "14px" }}>
+            <div style={{ padding: "10px 12px", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px" }}>
+              <strong style={{ fontSize: "10px", textTransform: "uppercase", color: "#475569", display: "block", marginBottom: "4px" }}>
+                1. Movement Observation
+              </strong>
+              <p style={{ margin: 0, fontSize: "11px", color: "#1e293b", lineHeight: "1.4" }}>
+                {synthesis.movementObservation}
+              </p>
+            </div>
+
+            <div style={{ padding: "10px 12px", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px" }}>
+              <strong style={{ fontSize: "10px", textTransform: "uppercase", color: "#475569", display: "block", marginBottom: "4px" }}>
+                2. Movement Reference Comparison
+              </strong>
+              <p style={{ margin: 0, fontSize: "11px", color: "#1e293b", lineHeight: "1.4" }}>
+                {synthesis.referenceComparison}
+              </p>
+            </div>
+
+            <div style={{ padding: "10px 12px", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px" }}>
+              <strong style={{ fontSize: "10px", textTransform: "uppercase", color: "#475569", display: "block", marginBottom: "4px" }}>
+                3. Symptom Screening
+              </strong>
+              <p style={{ margin: 0, fontSize: "11px", color: "#1e293b", lineHeight: "1.4" }}>
+                {synthesis.symptomScreening}
+              </p>
+            </div>
+
+            <div style={{ padding: "10px 12px", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px" }}>
+              <strong style={{ fontSize: "10px", textTransform: "uppercase", color: "#475569", display: "block", marginBottom: "4px" }}>
+                4. Screening Outcome
+              </strong>
+              <p style={{ margin: 0, fontSize: "11px", color: "#1e293b", lineHeight: "1.4" }}>
+                {synthesis.screeningOutcome}
+              </p>
+            </div>
+          </div>
+
+          {result.movementChecklist && Object.keys(result.movementChecklist).length > 0 && (
+            <div style={{ marginTop: "12px", borderTop: "1px solid #e2e8f0", paddingTop: "12px" }}>
+              <strong style={{ fontSize: "11px", color: "#334155", display: "block", marginBottom: "8px" }}>
+                Movement Tasks &amp; Reference Ranges
+              </strong>
+              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                {Object.entries(result.movementChecklist).map(([taskId, ev]) => {
+                  if (!ev) return null;
+                  const def = CHECKLIST_TASK_DEFINITIONS[taskId as ChecklistTaskId];
+                  const title = def ? def.title : taskId;
+                  return (
+                    <div
+                      key={taskId}
+                      style={{
+                        padding: "10px 12px",
+                        background: "#fff",
+                        border: "1px solid #e2e8f0",
+                        borderRadius: "8px",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+                        <span style={{ fontWeight: 600, fontSize: "12px", color: "#0f172a" }}>{title}</span>
+                        <span
+                          style={{
+                            fontSize: "10px",
+                            padding: "2px 8px",
+                            borderRadius: "10px",
+                            fontWeight: 600,
+                            background:
+                              ev.referenceComparison === "within-reference"
+                                ? "#dcfce7"
+                                : ev.referenceComparison === "outside-reference"
+                                  ? "#fee2e2"
+                                  : "#f1f5f9",
+                            color:
+                              ev.referenceComparison === "within-reference"
+                                ? "#15803d"
+                                : ev.referenceComparison === "outside-reference"
+                                  ? "#b91c1c"
+                                  : "#475569",
+                          }}
+                        >
+                          {ev.referenceComparison === "within-reference"
+                            ? "Within Reference"
+                            : ev.referenceComparison === "outside-reference"
+                              ? "Outside Reference"
+                              : "Unable to compare"}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: "11px", color: "#475569", marginBottom: "4px" }}>
+                        {ev.observableMetrics?.peakAngleDeg !== undefined && ev.observableMetrics?.peakAngleDeg !== null && (
+                          <span>Measured peak: <strong>{ev.observableMetrics.peakAngleDeg}°</strong> · </span>
+                        )}
+                        {ev.observableMetrics?.angleExcursionDeg !== undefined && ev.observableMetrics?.angleExcursionDeg !== null && (
+                          <span>Excursion: <strong>{ev.observableMetrics.angleExcursionDeg}°</strong> · </span>
+                        )}
+                        {ev.referenceRange && (
+                          <span>Reference range: <strong>{ev.referenceRange.rangeLabel}</strong> ({ev.referenceRange.sourceCitation}) · </span>
+                        )}
+                        <span>Tracking quality: <strong>{ev.trackingQuality.qualityStatus}</strong> ({Math.round(ev.trackingQuality.meanConfidence * 100)}% conf, {ev.trackingQuality.usableFrames}/{ev.trackingQuality.totalFrames} frames)</span>
+                      </div>
+                      <div style={{ fontSize: "11px", color: "#334155", fontStyle: "italic", background: "#f8fafc", padding: "6px 8px", borderRadius: "6px" }}>
+                        {generateSymptomConditionedInterpretation(ev, Boolean(synthesis.symptomScreening && synthesis.symptomScreening !== "No significant joint symptoms or functional difficulties reported."))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <div style={{ marginTop: "12px", fontSize: "10px", color: "#64748b", fontStyle: "italic", lineHeight: "1.4" }}>
+            {synthesis.disclaimer}
           </div>
         </section>
 
@@ -5458,11 +5748,154 @@ const MedicalReportView = memo(function MedicalReportView({
           </div>
         </div>
 
-        {/* Section 6: Exploratory Movement Assessment (if present) */}
-        {(record.gaitAssessment || record.manualGaitObservations) && (
+        {/* Section 6: Movement Assessment, Reference Comparison & Cautious Screening Synthesis */}
+        {(record.cautiousSynthesis || record.movementChecklist || record.gaitAssessment || record.manualGaitObservations) && (
           <div className="report-section-block">
-            <div className="report-section-header">6. Exploratory Movement Assessment &amp; Gait Kinematics</div>
+            <div className="report-section-header">6. Movement Assessment, Reference Comparison &amp; Screening Synthesis</div>
             <div className="report-section-body">
+              {(() => {
+                const syn: CautiousScreeningSynthesis =
+                  record.cautiousSynthesis ||
+                  determineCautiousScreeningCategory(
+                    record.formAnswers || {
+                      age: String(record.age),
+                      joint: record.joint,
+                      district: record.district,
+                    },
+                    record.movementChecklist || null,
+                    record.gaitAssessment || null,
+                    record.manualGaitObservations || null
+                  );
+
+                return (
+                  <div style={{ marginBottom: "10px" }}>
+                    <div
+                      style={{
+                        padding: "8px 10px",
+                        borderRadius: "6px",
+                        border:
+                          syn.category === "no-obvious-limitation-observed"
+                            ? "1px solid #86efac"
+                            : syn.category === "further-assessment-may-be-helpful"
+                              ? "1px solid #93c5fd"
+                              : syn.category === "assessment-incomplete"
+                                ? "1px solid #fde68a"
+                                : "1px solid #cbd5e1",
+                        background:
+                          syn.category === "no-obvious-limitation-observed"
+                            ? "#f0fdf4"
+                            : syn.category === "further-assessment-may-be-helpful"
+                              ? "#eff6ff"
+                              : syn.category === "assessment-incomplete"
+                                ? "#fffbeb"
+                                : "#f8fafc",
+                        marginBottom: "8px",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+                        <strong
+                          style={{
+                            fontSize: "9px",
+                            color:
+                              syn.category === "no-obvious-limitation-observed"
+                                ? "#166534"
+                                : syn.category === "further-assessment-may-be-helpful"
+                                  ? "#1e40af"
+                                  : syn.category === "assessment-incomplete"
+                                    ? "#92400e"
+                                    : "#334155",
+                          }}
+                        >
+                          Synthesis Category: {syn.categoryLabel}
+                        </strong>
+                        <span style={{ fontSize: "7.5px", background: "rgba(0,0,0,0.06)", padding: "2px 6px", borderRadius: "8px", fontWeight: 600 }}>
+                          {syn.category}
+                        </span>
+                      </div>
+                      <p style={{ margin: "2px 0 0", fontSize: "8px", color: "#334155", lineHeight: "1.4" }}>
+                        {syn.summary}
+                      </p>
+                    </div>
+
+                    <div className="report-grid-two" style={{ marginBottom: "8px" }}>
+                      <div className="report-data-pair">
+                        <span>1. Movement Observation</span>
+                        <strong>{syn.movementObservation}</strong>
+                      </div>
+                      <div className="report-data-pair">
+                        <span>2. Reference Comparison</span>
+                        <strong>{syn.referenceComparison}</strong>
+                      </div>
+                      <div className="report-data-pair">
+                        <span>3. Symptom Screening</span>
+                        <strong>{syn.symptomScreening}</strong>
+                      </div>
+                      <div className="report-data-pair">
+                        <span>4. Screening Outcome</span>
+                        <strong>{syn.screeningOutcome}</strong>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Documented Movement Checklist Tasks Table */}
+              {record.movementChecklist && Object.keys(record.movementChecklist).length > 0 && (
+                <div style={{ marginBottom: "10px" }}>
+                  <div style={{ fontSize: "8px", fontWeight: 700, color: "#1e293b", marginBottom: "4px" }}>
+                    Documented Movement Checklist Tasks &amp; Reference Comparison
+                  </div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "7.5px" }}>
+                    <thead>
+                      <tr style={{ background: "#f1f5f9", textAlign: "left" }}>
+                        <th style={{ padding: "4px 6px", border: "1px solid #e2e8f0" }}>Movement Task</th>
+                        <th style={{ padding: "4px 6px", border: "1px solid #e2e8f0" }}>Measured Angle / Excursion</th>
+                        <th style={{ padding: "4px 6px", border: "1px solid #e2e8f0" }}>Reference Range &amp; Source</th>
+                        <th style={{ padding: "4px 6px", border: "1px solid #e2e8f0" }}>Comparison Result</th>
+                        <th style={{ padding: "4px 6px", border: "1px solid #e2e8f0" }}>Tracking Quality</th>
+                        <th style={{ padding: "4px 6px", border: "1px solid #e2e8f0" }}>Interpretation</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(record.movementChecklist).map(([taskId, ev]) => {
+                        if (!ev) return null;
+                        const def = CHECKLIST_TASK_DEFINITIONS[taskId as ChecklistTaskId];
+                        const title = def ? def.title : taskId;
+                        const hasSymptoms = Boolean(record.contributingFactors && record.contributingFactors.length > 0);
+                        return (
+                          <tr key={taskId}>
+                            <td style={{ padding: "4px 6px", border: "1px solid #e2e8f0", fontWeight: 600 }}>{title}</td>
+                            <td style={{ padding: "4px 6px", border: "1px solid #e2e8f0" }}>
+                              {ev.observableMetrics?.peakAngleDeg !== undefined && ev.observableMetrics?.peakAngleDeg !== null
+                                ? `${ev.observableMetrics.peakAngleDeg}° peak`
+                                : ev.observableMetrics?.angleExcursionDeg !== undefined && ev.observableMetrics?.angleExcursionDeg !== null
+                                  ? `${ev.observableMetrics.angleExcursionDeg}° excursion`
+                                  : "N/A"}
+                            </td>
+                            <td style={{ padding: "4px 6px", border: "1px solid #e2e8f0" }}>
+                              {ev.referenceRange ? `${ev.referenceRange.rangeLabel} (${ev.referenceRange.sourceCitation})` : "Exploratory / No verified range"}
+                            </td>
+                            <td style={{ padding: "4px 6px", border: "1px solid #e2e8f0", fontWeight: 600 }}>
+                              {ev.referenceComparison === "within-reference"
+                                ? "Within Reference"
+                                : ev.referenceComparison === "outside-reference"
+                                  ? "Outside Reference"
+                                  : "Unable to compare"}
+                            </td>
+                            <td style={{ padding: "4px 6px", border: "1px solid #e2e8f0" }}>
+                              {ev.trackingQuality.qualityStatus} ({Math.round(ev.trackingQuality.meanConfidence * 100)}% conf)
+                            </td>
+                            <td style={{ padding: "4px 6px", border: "1px solid #e2e8f0", fontStyle: "italic" }}>
+                              {generateSymptomConditionedInterpretation(ev, hasSymptoms)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
               {record.gaitAssessment && record.gaitAssessment.status === "completed" && (
                 <div className="report-grid-two" style={{ marginBottom: "8px" }}>
                   <div className="report-data-pair">
@@ -5508,7 +5941,7 @@ const MedicalReportView = memo(function MedicalReportView({
                 </div>
               )}
               <div style={{ fontSize: "7.5px", color: "#668379", fontStyle: "italic", marginTop: "6px" }}>
-                Movement features are exploratory computer vision outputs for clinician discussion only. They do not constitute an osteoarthritis diagnosis or severity grading.
+                Movement angles are only one source of information and cannot determine osteoarthritis status or rule it out. OA screening requires clinical history, physical examination, and clinician-directed imaging when appropriate. This document is a non-diagnostic screening report.
               </div>
             </div>
           </div>

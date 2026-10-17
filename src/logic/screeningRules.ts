@@ -53,6 +53,29 @@ import type {
   ManualGaitObservations,
 } from "../services/gaitAnalysisService";
 import type { XrayDoctorReview } from "./xrayModels";
+import {
+  CHECKLIST_TASK_DEFINITIONS,
+  type ChecklistTaskId,
+  type ChecklistTaskEvaluation,
+} from "./movementChecklistEvaluation.ts";
+
+export type CautiousScreeningCategory =
+  | "assessment-incomplete"
+  | "no-obvious-limitation-observed"
+  | "further-assessment-may-be-helpful"
+  | "unable-to-evaluate-reliably";
+
+export interface CautiousScreeningSynthesis {
+  category: CautiousScreeningCategory;
+  categoryLabel: string;
+  summary: string;
+  movementObservation: string;
+  referenceComparison: string;
+  symptomScreening: string;
+  screeningOutcome: string;
+  urgentCareGuidanceActive: boolean;
+  disclaimer: string;
+}
 
 export interface Screening {
   id: string;
@@ -77,6 +100,8 @@ export interface Screening {
   urgentCareNotice?: UrgentCareNotice;
   gaitAssessment?: StructuredGaitAnalysisOutput;
   manualGaitObservations?: ManualGaitObservations;
+  movementChecklist?: Partial<Record<ChecklistTaskId, ChecklistTaskEvaluation | null>>;
+  cautiousSynthesis?: CautiousScreeningSynthesis;
   // Patient-Doctor Workflow States
   sharingStatus?: SharingStatus;
   sharingConsentGivenAt?: number | null;
@@ -368,6 +393,8 @@ export function exportRecordsToCsv(records: Screening[]): string {
     "X-ray Review Status",
     "X-ray Predicted KL Grade",
     "X-ray Clinician Confirmed KL",
+    "Cautious Screening Category",
+    "Movement Reference Comparison Summary",
   ];
 
   const lines = [headers.map(escapeCsvField).join(",")];
@@ -424,6 +451,8 @@ export function exportRecordsToCsv(records: Screening[]): string {
       xrayStatus,
       xrayPredictedKl,
       xrayConfirmedKl,
+      record.cautiousSynthesis?.categoryLabel || "Standard assessment",
+      record.cautiousSynthesis?.referenceComparison || "Not evaluated",
     ];
     lines.push(row.map(escapeCsvField).join(","));
   }
@@ -559,6 +588,249 @@ export function checkUrgentCareGuidance(values: Partial<FormValues>): UrgentCare
   };
 }
 
+export function determineCautiousScreeningCategory(
+  formValues: Partial<FormValues>,
+  checklistEvaluations?: Partial<Record<ChecklistTaskId, ChecklistTaskEvaluation | null>> | null,
+  gaitAssessment?: StructuredGaitAnalysisOutput | null,
+  manualObservations?: ManualGaitObservations | null
+): CautiousScreeningSynthesis {
+  const disclaimer =
+    "Movement angles are only one exploratory source of information and do not determine osteoarthritis status. OA screening may require clinical history, physical examination, and clinician-directed imaging. This is not a diagnosis.";
+
+  const urgentNotice = checkUrgentCareGuidance(formValues);
+
+  // 1. Gather Movement Observations & Reference Comparisons
+  const movementObsParts: string[] = [];
+  const refCompParts: string[] = [];
+  let evaluatedTaskCount = 0;
+  let withinRefCount = 0;
+  let outsideRefCount = 0;
+  let unableToCompareCount = 0;
+
+  if (checklistEvaluations) {
+    for (const [taskId, ev] of Object.entries(checklistEvaluations)) {
+      if (!ev || ev.status === "not-started") continue;
+      evaluatedTaskCount++;
+      const def = CHECKLIST_TASK_DEFINITIONS[taskId as ChecklistTaskId];
+      const taskTitle = def ? def.title : taskId;
+
+      if (ev.status === "completed") {
+        const peak =
+          ev.observableMetrics?.peakAngleDeg !== undefined && ev.observableMetrics?.peakAngleDeg !== null
+            ? `${ev.observableMetrics.peakAngleDeg}°`
+            : null;
+        const exc =
+          ev.observableMetrics?.angleExcursionDeg !== undefined && ev.observableMetrics?.angleExcursionDeg !== null
+            ? `${ev.observableMetrics.angleExcursionDeg}° excursion`
+            : null;
+        const rise =
+          ev.observableMetrics?.verticalDisplacementNorm !== undefined && ev.observableMetrics?.verticalDisplacementNorm !== null
+            ? `${(ev.observableMetrics.verticalDisplacementNorm * 100).toFixed(1)}% rise`
+            : null;
+        const sway =
+          ev.observableMetrics?.lateralDisplacementNorm !== undefined && ev.observableMetrics?.lateralDisplacementNorm !== null
+            ? `${(ev.observableMetrics.lateralDisplacementNorm * 100).toFixed(1)}% sway`
+            : null;
+
+        const metricsDesc = [peak ? `peak ${peak}` : null, exc, rise, sway].filter(Boolean).join(", ");
+        movementObsParts.push(`${taskTitle}: ${metricsDesc || "movement detected"} (${Math.round(ev.trackingQuality.meanConfidence * 100)}% conf)`);
+
+        if (ev.referenceComparison === "within-reference") {
+          withinRefCount++;
+          refCompParts.push(`${taskTitle}: within reference (${ev.referenceRange?.rangeLabel ?? "standard range"})`);
+        } else if (ev.referenceComparison === "outside-reference") {
+          outsideRefCount++;
+          refCompParts.push(`${taskTitle}: outside reference (${ev.referenceRange?.rangeLabel ?? "standard range"})`);
+        } else {
+          unableToCompareCount++;
+        }
+      } else if (ev.status === "try-again") {
+        movementObsParts.push(`${taskTitle}: movement incomplete / not clearly detected`);
+        unableToCompareCount++;
+      } else if (ev.status === "unable-to-evaluate") {
+        movementObsParts.push(`${taskTitle}: unable to evaluate (tracking/occlusion)`);
+        unableToCompareCount++;
+      }
+    }
+  }
+
+  if (gaitAssessment && gaitAssessment.status === "completed") {
+    movementObsParts.push(
+      `Gait tracking: cadence ${gaitAssessment.features.cadence?.value ?? "N/A"} steps/min, symmetry ${gaitAssessment.features.stepSymmetry?.value ?? "N/A"}, knee ROM ${gaitAssessment.features.activeKneeFlexionRange?.value ?? "N/A"}°`
+    );
+  }
+
+  const movementObservation =
+    movementObsParts.length > 0
+      ? movementObsParts.join("; ")
+      : "No camera movement assessment performed during this session.";
+
+  const referenceComparison =
+    refCompParts.length > 0
+      ? refCompParts.join("; ")
+      : evaluatedTaskCount > 0 && unableToCompareCount === evaluatedTaskCount
+        ? "Unable to evaluate reliably against reference ranges due to camera lighting, visibility, or tracking limitations."
+        : "Reference comparison not evaluated.";
+
+  // 2. Gather Symptom Screening
+  const symptomParts: string[] = [];
+  const painNum = Number(formValues.painLevel);
+  if (Number.isFinite(painNum) && painNum > 0) {
+    symptomParts.push(`Discomfort: ${painNum}/10`);
+  }
+  if (formValues.painDuration && formValues.painDuration !== "under-2-weeks" && formValues.painDuration !== "not-checked") {
+    symptomParts.push(`Duration: ${DURATION_LABELS[formValues.painDuration] ?? formValues.painDuration}`);
+  }
+  if (formValues.stiffness && formValues.stiffness !== "none" && formValues.stiffness !== "not-checked") {
+    symptomParts.push(`Morning/rest stiffness: ${STIFFNESS_LABELS[formValues.stiffness] ?? formValues.stiffness}`);
+  }
+  if (formValues.mobility && formValues.mobility !== "no" && formValues.mobility !== "not-checked") {
+    symptomParts.push(`Everyday activities: ${MOBILITY_LABELS[formValues.mobility] ?? formValues.mobility}`);
+  }
+  if (formValues.previousInjury === true) symptomParts.push("Prior joint injury reported");
+  if (formValues.familyHistory === true) symptomParts.push("Family history of joint issues reported");
+  if (formValues.repeatedLoad === true) symptomParts.push("Frequent heavy physical load reported");
+
+  if (manualObservations?.visibleLimp === true) symptomParts.push("Observed visible limp");
+  if (manualObservations?.hesitantSitToStand === true) symptomParts.push("Observed chair-rise hesitancy");
+  if (manualObservations?.audibleCrepitusReported === true) symptomParts.push("Joint crepitus reported");
+
+  const hasReportedSymptoms =
+    (Number.isFinite(painNum) && painNum >= 3) ||
+    formValues.painDuration === "over-3-months" ||
+    formValues.painDuration === "1-3-months" ||
+    formValues.painDuration === "2-4-weeks" ||
+    formValues.stiffness === "over-30" ||
+    formValues.stiffness === "under-30" ||
+    formValues.mobility === "significant" ||
+    formValues.mobility === "some" ||
+    formValues.previousInjury === true ||
+    formValues.familyHistory === true ||
+    formValues.repeatedLoad === true ||
+    manualObservations?.visibleLimp === true ||
+    manualObservations?.hesitantSitToStand === true ||
+    manualObservations?.audibleCrepitusReported === true;
+
+  const symptomScreening =
+    symptomParts.length > 0
+      ? symptomParts.join(", ")
+      : "No significant joint symptoms or functional difficulties reported.";
+
+  // 3. Determine Cautious Category & Synthesis
+
+  // PRIORITY 1: Acute Red Flags
+  if (urgentNotice.hasRedFlags) {
+    return {
+      category: "further-assessment-may-be-helpful",
+      categoryLabel: "Further assessment may be helpful (Urgent Medical Guidance)",
+      summary:
+        "Important medical notice: Acute red-flag symptoms were reported. Reassuring movement angles do NOT override these warnings. Prompt evaluation by a medical doctor at a PHC or hospital emergency is advised.",
+      movementObservation,
+      referenceComparison,
+      symptomScreening,
+      screeningOutcome:
+        "Urgent medical guidance: One or more red-flag symptoms were reported (such as sudden severe pain/swelling, hot/red joint with fever, or inability to bear weight after an injury). Even if observed movement angles appear within typical ranges, clinical evaluation should not be delayed.",
+      urgentCareGuidanceActive: true,
+      disclaimer,
+    };
+  }
+
+  // PRIORITY 2: Assessment Incomplete
+  const isFormIncomplete =
+    !formValues.age ||
+    Number(formValues.age) < 18 ||
+    !formValues.joint ||
+    formValues.painDuration === "not-checked" ||
+    formValues.stiffness === "not-checked" ||
+    formValues.mobility === "not-checked";
+
+  if (isFormIncomplete) {
+    return {
+      category: "assessment-incomplete",
+      categoryLabel: "Assessment incomplete",
+      summary: "Insufficient reliable measurements or questionnaire answers to complete screening synthesis.",
+      movementObservation,
+      referenceComparison,
+      symptomScreening,
+      screeningOutcome:
+        "Assessment incomplete: Key screening questions or measurements were omitted. Please provide complete responses for a balanced overview.",
+      urgentCareGuidanceActive: false,
+      disclaimer,
+    };
+  }
+
+  // PRIORITY 3: Unable to Evaluate Reliably
+  const movementAttempted = evaluatedTaskCount > 0;
+  const allMovementUnable = movementAttempted && withinRefCount === 0 && outsideRefCount === 0;
+  if (allMovementUnable && !hasReportedSymptoms) {
+    return {
+      category: "unable-to-evaluate-reliably",
+      categoryLabel: "Unable to evaluate reliably",
+      summary: "Camera tracking quality, lighting, or landmark visibility was insufficient to evaluate movement reliably.",
+      movementObservation,
+      referenceComparison,
+      symptomScreening,
+      screeningOutcome:
+        "Unable to evaluate reliably: Poor camera visibility, occluded landmarks, or insufficient movement duration prevented reliable angle analysis. This technical limitation is not a sign of joint disease. Consult a clinician if you experience joint discomfort.",
+      urgentCareGuidanceActive: false,
+      disclaimer,
+    };
+  }
+
+  // PRIORITY 4: Further Assessment May Be Helpful
+  if (hasReportedSymptoms || outsideRefCount > 0) {
+    let summaryMsg: string;
+    let outcomeMsg: string;
+
+    if (withinRefCount > 0 && outsideRefCount === 0) {
+      // Angles within reference range, but user reported symptoms
+      summaryMsg =
+        "Your observed movement is within the selected reference range, but this does not rule out osteoarthritis. Your reported symptoms may still warrant further assessment by a healthcare professional.";
+      outcomeMsg =
+        "Observed movement fell within documented reference ranges; however, reported pain, stiffness, or functional difficulties suggest that further assessment by a healthcare professional may be helpful. Movement angles by themselves cannot determine whether osteoarthritis is present.";
+    } else if (outsideRefCount > 0) {
+      // Measured angles outside reference range
+      summaryMsg =
+        "Observed movement was outside the documented reference range. This result may reflect limited mobility or measurement variability. Symptoms and clinical findings should be evaluated together by a healthcare professional before drawing clinical conclusions. This does not label you as OA-positive.";
+      outcomeMsg =
+        "The measured movement angle or excursion was outside the selected reference range. This finding may reflect limited joint mobility, pain avoidance, or measurement variability (including camera tilt or loose clothing). A clinical history, physical examination, and clinician-directed imaging when appropriate are needed to understand joint health.";
+    } else {
+      // No movement completed, but symptoms reported
+      summaryMsg =
+        "Reported joint symptoms or functional difficulties suggest that further assessment by a healthcare professional may be helpful.";
+      outcomeMsg =
+        "Your reported symptoms warrant consideration by a qualified health professional. Movement assessment was not performed or was inconclusive.";
+    }
+
+    return {
+      category: "further-assessment-may-be-helpful",
+      categoryLabel: "Further assessment may be helpful",
+      summary: summaryMsg,
+      movementObservation,
+      referenceComparison,
+      symptomScreening,
+      screeningOutcome: outcomeMsg,
+      urgentCareGuidanceActive: false,
+      disclaimer,
+    };
+  }
+
+  // PRIORITY 5: No Obvious Limitation Observed
+  return {
+    category: "no-obvious-limitation-observed",
+    categoryLabel: "No obvious limitation observed",
+    summary:
+      "This movement assessment did not identify an obvious limitation in the measured movement. Please note that this cannot rule out osteoarthritis.",
+    movementObservation,
+    referenceComparison,
+    symptomScreening,
+    screeningOutcome:
+      "The tested movement was within the selected reference range, with no significant concerns identified by the available screening questions. This does not rule out osteoarthritis, as early joint changes may occur without measurable range-of-motion deficit in exploratory 2D camera testing.",
+    urgentCareGuidanceActive: false,
+    disclaimer,
+  };
+}
+
 export interface EvaluationResult {
   score: number;
   band: RiskBand;
@@ -571,9 +843,15 @@ export interface EvaluationResult {
   isPreliminaryDueToMissingData: boolean;
   bmi: number | null;
   urgentCareNotice: UrgentCareNotice;
+  cautiousSynthesis?: CautiousScreeningSynthesis;
 }
 
-export function evaluateScreening(form: FormValues): EvaluationResult {
+export function evaluateScreening(
+  form: FormValues,
+  checklistEvaluations?: Partial<Record<ChecklistTaskId, ChecklistTaskEvaluation | null>> | null,
+  gaitAssessment?: StructuredGaitAnalysisOutput | null,
+  manualObservations?: ManualGaitObservations | null
+): EvaluationResult {
   const score = calculateRiskScore(form);
   const band = getRiskBand(score);
 
@@ -749,6 +1027,12 @@ export function evaluateScreening(form: FormValues): EvaluationResult {
   const isPreliminaryDueToMissingData = unassessed.length >= 3;
   const bmi = calculateBMI(form.weightKg, form.heightCm);
   const urgentCareNotice = checkUrgentCareGuidance(form);
+  const cautiousSynthesis = determineCautiousScreeningCategory(
+    form,
+    checklistEvaluations,
+    gaitAssessment,
+    manualObservations
+  );
 
   return {
     score,
@@ -762,6 +1046,7 @@ export function evaluateScreening(form: FormValues): EvaluationResult {
     isPreliminaryDueToMissingData,
     bmi,
     urgentCareNotice,
+    cautiousSynthesis,
   };
 }
 
@@ -955,6 +1240,8 @@ export function loadStoredScreenings(): Screening[] {
           urgentCareNotice: record.urgentCareNotice,
           gaitAssessment: record.gaitAssessment,
           manualGaitObservations: record.manualGaitObservations,
+          movementChecklist: record.movementChecklist,
+          cautiousSynthesis: record.cautiousSynthesis,
           sharingStatus:
             record.sharingStatus === "shared" || record.sharingStatus === "withdrawn"
               ? record.sharingStatus

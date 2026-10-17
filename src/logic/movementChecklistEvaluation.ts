@@ -48,11 +48,31 @@ export interface ChecklistTaskDefinition {
   requiredLandmarks: string[];
 }
 
+export type ReferenceComparisonStatus =
+  | "within-reference"
+  | "outside-reference"
+  | "unable-to-compare";
+
+export interface TaskReferenceRange {
+  rangeLabel: string;
+  minAngleDeg?: number;
+  maxAngleDeg?: number;
+  minExcursionDeg?: number;
+  minDisplacementNorm?: number;
+  source: string;
+  sourceCitation: string;
+  methodologyNote: string;
+}
+
 export interface ChecklistTaskEvaluation {
   taskId: ChecklistTaskId;
   status: ChecklistTaskStatus;
   outcomeLabel: ChecklistOutcomeLabel;
   feedbackSummary: string;
+  referenceRange?: TaskReferenceRange;
+  referenceComparison?: ReferenceComparisonStatus;
+  referenceComparisonNotice?: string;
+  contextualSymptomInterpretation?: string;
   observableMetrics?: {
     peakAngleDeg?: number | null;
     baselineAngleDeg?: number | null;
@@ -80,7 +100,78 @@ export interface ChecklistOverallSummary {
   unableCount: number;
   notStartedCount: number;
   allAttempted: boolean;
+  withinReferenceCount: number;
+  outsideReferenceCount: number;
+  unableToCompareCount: number;
   warnings: string[];
+}
+
+/**
+ * Documented reference ranges supported by published clinical goniometric
+ * and biomechanical literature, with explicit 2D monocular camera disclosures.
+ */
+export const TASK_REFERENCE_RANGES: Record<ChecklistTaskId, TaskReferenceRange> = {
+  "seated-knee-extension": {
+    rangeLabel: "Terminal extension 165°–180° (extension deficit ≤ 15°), excursion ≥ 30°",
+    minAngleDeg: 165,
+    maxAngleDeg: 180,
+    minExcursionDeg: 30,
+    source: "American Academy of Orthopaedic Surgeons (AAOS) & Norkin/White Clinical Goniometry",
+    sourceCitation: "Norkin CC, White DJ. Measurement of Joint Motion: A Guide to Goniometry. 5th ed. FA Davis; 2016.",
+    methodologyNote: "2D planar camera projection. Parallax, clothing, and camera elevation cause ~5°–10° variance versus universal goniometer. Angle alone does not determine OA.",
+  },
+  "seated-knee-flexion": {
+    rangeLabel: "Active seated flexion depth ≤ 95° from forward position, excursion ≥ 25°",
+    minAngleDeg: 0,
+    maxAngleDeg: 95,
+    minExcursionDeg: 25,
+    source: "AAOS Clinical Range of Motion Guidelines & Clarkson Goniometric Standards",
+    sourceCitation: "Clarkson HM. Musculoskeletal Assessment: Joint Motion and Muscle Testing. 3rd ed. Wolters Kluwer; 2013.",
+    methodologyNote: "Active heel slide under chair is partially constrained by chair geometry. Monocular camera evaluates planar trajectory only.",
+  },
+  "sit-to-stand": {
+    rangeLabel: "Terminal upright knee extension 165°–180°, vertical rise ≥ 8% of frame height",
+    minAngleDeg: 165,
+    maxAngleDeg: 180,
+    minDisplacementNorm: 0.08,
+    source: "Bohannon Chair-Rise Kinematic Criteria & AAOS Biomechanical Standards",
+    sourceCitation: "Bohannon RW. Sit-to-stand test for measuring performance of lower extremity muscles. Clin Rehabil. 2006;20(8):723-731.",
+    methodologyNote: "Measures visible torso-pelvic vertical translation and knee opening in camera view. Cannot measure ground reaction force or unilateral limb offloading.",
+  },
+  "supported-weight-shift": {
+    rangeLabel: "Coronal pelvic/torso shift ≥ 3.5% of frame width with bilateral foot stability",
+    minDisplacementNorm: 0.035,
+    source: "Clinical Observational Gait and Balance Assessment Standards",
+    sourceCitation: "Tinetti ME. Performance-oriented assessment of mobility problems in elderly patients. J Am Geriatr Soc. 1986;34(2):119-126.",
+    methodologyNote: "Observes 2D lateral shift in camera view only. Standard RGB video cannot measure plantigrade load distribution, foot pressure, or joint forces.",
+  },
+};
+
+/**
+ * Generates clear, cautious interpretation combining movement observation with symptom context.
+ */
+export function generateSymptomConditionedInterpretation(
+  taskEvaluation: ChecklistTaskEvaluation,
+  symptomsReported: boolean
+): string {
+  const comparison = taskEvaluation.referenceComparison;
+
+  if (taskEvaluation.status === "unable-to-evaluate" || comparison === "unable-to-compare") {
+    return "Tracking confidence or landmark visibility was insufficient to evaluate this movement reliably. This is not an indicator of joint abnormality. If you experience joint discomfort or functional limitation, consider a professional evaluation.";
+  }
+
+  if (comparison === "within-reference") {
+    if (symptomsReported) {
+      return "Your observed movement is within the selected reference range, but this does not rule out osteoarthritis. Your reported symptoms may still warrant further assessment by a healthcare professional.";
+    }
+    return "This movement assessment did not identify an obvious limitation in the measured movement. Please note that this cannot rule out osteoarthritis.";
+  }
+
+  if (comparison === "outside-reference") {
+    return "The observed angle or excursion fell outside the documented reference range. This result may reflect limited mobility or measurement variability. Symptoms and clinical history should be evaluated together by a healthcare professional before drawing clinical conclusions. This does not constitute an osteoarthritis diagnosis.";
+  }
+
+  return "Exploratory movement observation. Does not constitute a clinical diagnosis or risk score.";
 }
 
 export const CHECKLIST_TASK_DEFINITIONS: Record<ChecklistTaskId, ChecklistTaskDefinition> = {
@@ -178,8 +269,7 @@ function assessTrackingQuality(frames: ValidatedPoseFrame[]): {
   qualityStatus: "good" | "fair" | "insufficient" | "unusable";
   warning?: string;
 } {
-  const total = frames.length;
-  if (total === 0) {
+  if (!Array.isArray(frames) || frames.length === 0) {
     return {
       totalFrames: 0,
       usableFrames: 0,
@@ -189,11 +279,12 @@ function assessTrackingQuality(frames: ValidatedPoseFrame[]): {
     };
   }
 
+  const total = frames.length;
   let usableCount = 0;
   let totalConf = 0;
 
   for (const f of frames) {
-    if (f.isUsable) {
+    if (f && f.isUsable) {
       usableCount++;
       totalConf += f.meanConfidence;
     }
@@ -249,6 +340,9 @@ export function evaluateSeatedKneeExtension(frames: ValidatedPoseFrame[]): Check
       status: "unable-to-evaluate",
       outcomeLabel: "Unable to evaluate",
       feedbackSummary: "Your body landmarks were not visible enough to evaluate this movement. Please position the camera at waist height and ensure your hip, knee, and ankle are in view.",
+      referenceRange: TASK_REFERENCE_RANGES["seated-knee-extension"],
+      referenceComparison: "unable-to-compare",
+      referenceComparisonNotice: "Unable to evaluate reliably: landmark visibility was too low or limbs were occluded.",
       trackingQuality,
       limitations,
       disclaimer: NON_DIAGNOSTIC_DISCLAIMER,
@@ -305,16 +399,49 @@ export function evaluateSeatedKneeExtension(frames: ValidatedPoseFrame[]): Check
   const leftExc = getExcursion(leftAngles);
   const rightExc = getExcursion(rightAngles);
 
+  if (leftAngles.length < 6 && rightAngles.length < 6) {
+    return {
+      taskId: "seated-knee-extension",
+      status: "unable-to-evaluate",
+      outcomeLabel: "Unable to evaluate",
+      feedbackSummary: "Key knee and ankle landmarks were occluded or not detected clearly enough to measure joint angles.",
+      referenceRange: TASK_REFERENCE_RANGES["seated-knee-extension"],
+      referenceComparison: "unable-to-compare",
+      referenceComparisonNotice: "Unable to evaluate reliably: knee and ankle landmarks could not be tracked consistently.",
+      trackingQuality,
+      limitations,
+      disclaimer: NON_DIAGNOSTIC_DISCLAIMER,
+      evaluatedAt,
+    };
+  }
+
   const activeSide: "left" | "right" = leftExc.excursion >= rightExc.excursion ? "left" : "right";
   const activeStats = activeSide === "left" ? leftExc : rightExc;
 
   // Extension threshold: at least 16° increase toward extension
   if (activeStats.excursion >= 16) {
+    const isWithin =
+      activeStats.peak !== null &&
+      activeStats.peak >= 165 &&
+      activeStats.peak <= 185 &&
+      activeStats.excursion >= 30;
+
+    const referenceComparison: ReferenceComparisonStatus = isWithin
+      ? "within-reference"
+      : "outside-reference";
+
+    const referenceComparisonNotice = isWithin
+      ? "Movement observed within the selected reference range (terminal extension 165°–180°, excursion ≥ 30°)."
+      : `Observed peak extension (${activeStats.peak}°) or excursion (${Math.round(activeStats.excursion)}°) was outside the documented reference range (165°–180°, excursion ≥ 30°). This may reflect limited mobility or measurement variability.`;
+
     return {
       taskId: "seated-knee-extension",
       status: "completed",
       outcomeLabel: "Movement detected",
       feedbackSummary: `Movement detected — seated knee extension excursion of approx. ${Math.round(activeStats.excursion)}° observed on ${activeSide} limb. Recording completed.`,
+      referenceRange: TASK_REFERENCE_RANGES["seated-knee-extension"],
+      referenceComparison,
+      referenceComparisonNotice,
       observableMetrics: {
         baselineAngleDeg: activeStats.baseline,
         peakAngleDeg: activeStats.peak,
@@ -333,6 +460,9 @@ export function evaluateSeatedKneeExtension(frames: ValidatedPoseFrame[]): Check
     status: "try-again",
     outcomeLabel: "Movement not clearly detected",
     feedbackSummary: "Movement not clearly detected. Ensure you slowly straighten your knee fully within your comfortable range and try again.",
+    referenceRange: TASK_REFERENCE_RANGES["seated-knee-extension"],
+    referenceComparison: "unable-to-compare",
+    referenceComparisonNotice: "Movement not clearly detected or incomplete. Straighten the knee fully within comfort to evaluate against reference range.",
     observableMetrics: {
       baselineAngleDeg: activeStats.baseline,
       peakAngleDeg: activeStats.peak,
@@ -365,6 +495,9 @@ export function evaluateSeatedKneeFlexion(frames: ValidatedPoseFrame[]): Checkli
       status: "unable-to-evaluate",
       outcomeLabel: "Unable to evaluate",
       feedbackSummary: "Your body landmarks were not visible enough to evaluate this movement. Please ensure your chair and leg joints remain visible.",
+      referenceRange: TASK_REFERENCE_RANGES["seated-knee-flexion"],
+      referenceComparison: "unable-to-compare",
+      referenceComparisonNotice: "Unable to evaluate reliably: landmark visibility was too low or leg joints were occluded.",
       trackingQuality,
       limitations,
       disclaimer: NON_DIAGNOSTIC_DISCLAIMER,
@@ -409,16 +542,48 @@ export function evaluateSeatedKneeFlexion(frames: ValidatedPoseFrame[]): Checkli
   const leftFlex = getFlexionExcursion(leftAngles);
   const rightFlex = getFlexionExcursion(rightAngles);
 
+  if (leftAngles.length < 6 && rightAngles.length < 6) {
+    return {
+      taskId: "seated-knee-flexion",
+      status: "unable-to-evaluate",
+      outcomeLabel: "Unable to evaluate",
+      feedbackSummary: "Key knee and ankle landmarks were occluded or not detected clearly enough to measure joint angles.",
+      referenceRange: TASK_REFERENCE_RANGES["seated-knee-flexion"],
+      referenceComparison: "unable-to-compare",
+      referenceComparisonNotice: "Unable to evaluate reliably: knee and ankle landmarks could not be tracked consistently.",
+      trackingQuality,
+      limitations,
+      disclaimer: NON_DIAGNOSTIC_DISCLAIMER,
+      evaluatedAt,
+    };
+  }
+
   const activeSide: "left" | "right" = leftFlex.excursion >= rightFlex.excursion ? "left" : "right";
   const activeStats = activeSide === "left" ? leftFlex : rightFlex;
 
   // Flexion threshold: at least 14° decrease in angle as knee bends back
   if (activeStats.excursion >= 14) {
+    const isWithin =
+      activeStats.minAngle !== null &&
+      activeStats.minAngle <= 95 &&
+      activeStats.excursion >= 25;
+
+    const referenceComparison: ReferenceComparisonStatus = isWithin
+      ? "within-reference"
+      : "outside-reference";
+
+    const referenceComparisonNotice = isWithin
+      ? "Movement observed within the selected reference range (seated flexion depth ≤ 95°, excursion ≥ 25°)."
+      : `Observed flexion depth (${activeStats.minAngle}°) or excursion (${Math.round(activeStats.excursion)}°) was outside the documented reference range (≤ 95°, excursion ≥ 25°). This may reflect limited mobility or measurement variability.`;
+
     return {
       taskId: "seated-knee-flexion",
       status: "completed",
       outcomeLabel: "Movement detected",
       feedbackSummary: `Movement detected — seated knee flexion excursion of approx. ${Math.round(activeStats.excursion)}° observed on ${activeSide} limb. Recording completed.`,
+      referenceRange: TASK_REFERENCE_RANGES["seated-knee-flexion"],
+      referenceComparison,
+      referenceComparisonNotice,
       observableMetrics: {
         baselineAngleDeg: activeStats.baseline,
         peakAngleDeg: activeStats.minAngle,
@@ -437,6 +602,9 @@ export function evaluateSeatedKneeFlexion(frames: ValidatedPoseFrame[]): Checkli
     status: "try-again",
     outcomeLabel: "Movement not clearly detected",
     feedbackSummary: "Movement not clearly detected. Ensure you start with the leg forward and gently bend the knee backward under the chair within comfort.",
+    referenceRange: TASK_REFERENCE_RANGES["seated-knee-flexion"],
+    referenceComparison: "unable-to-compare",
+    referenceComparisonNotice: "Movement not clearly detected or incomplete. Start with leg forward and bend backward under chair to evaluate against reference range.",
     observableMetrics: {
       baselineAngleDeg: activeStats.baseline,
       peakAngleDeg: activeStats.minAngle,
@@ -469,6 +637,9 @@ export function evaluateSitToStand(frames: ValidatedPoseFrame[]): ChecklistTaskE
       status: "unable-to-evaluate",
       outcomeLabel: "Unable to evaluate",
       feedbackSummary: "Your body landmarks were not visible enough to evaluate this movement. Please step back 2–3 meters so your full body is visible when standing.",
+      referenceRange: TASK_REFERENCE_RANGES["sit-to-stand"],
+      referenceComparison: "unable-to-compare",
+      referenceComparisonNotice: "Unable to evaluate reliably: full-body landmarks were not continuously visible.",
       trackingQuality,
       limitations,
       disclaimer: NON_DIAGNOSTIC_DISCLAIMER,
@@ -516,6 +687,9 @@ export function evaluateSitToStand(frames: ValidatedPoseFrame[]): ChecklistTaskE
       status: "unable-to-evaluate",
       outcomeLabel: "Unable to evaluate",
       feedbackSummary: "Camera tracking confidence was too low on pelvic landmarks. Please ensure good lighting and clear camera line-of-sight.",
+      referenceRange: TASK_REFERENCE_RANGES["sit-to-stand"],
+      referenceComparison: "unable-to-compare",
+      referenceComparisonNotice: "Unable to evaluate reliably: pelvic landmarks were not continuously visible.",
       trackingQuality,
       limitations,
       disclaimer: NON_DIAGNOSTIC_DISCLAIMER,
@@ -537,11 +711,23 @@ export function evaluateSitToStand(frames: ValidatedPoseFrame[]): ChecklistTaskE
 
   // Requirement: Significant vertical rise (> 0.06 normalized frame) AND knee extension opening (> 20°)
   if (verticalRise >= 0.06 && (kneeExtensionExcursion >= 20 || peakStandingAngle >= 150)) {
+    const isWithin = peakStandingAngle >= 165 && verticalRise >= 0.08;
+    const referenceComparison: ReferenceComparisonStatus = isWithin
+      ? "within-reference"
+      : "outside-reference";
+
+    const referenceComparisonNotice = isWithin
+      ? "Movement observed within the selected reference range (terminal upright knee extension 165°–180°, vertical rise ≥ 8% frame)."
+      : `Observed chair-rise kinematics (upright knee: ${Math.round(peakStandingAngle)}°, vertical rise: ${(verticalRise * 100).toFixed(1)}%) were outside the documented reference range (165°–180°, rise ≥ 8%). This may reflect limited mobility or measurement variability.`;
+
     return {
       taskId: "sit-to-stand",
       status: "completed",
       outcomeLabel: "Movement detected",
       feedbackSummary: `Movement detected — chair rise and sit-down transition observed (vertical displacement: ${(verticalRise * 100).toFixed(1)}% of frame). Recording completed.`,
+      referenceRange: TASK_REFERENCE_RANGES["sit-to-stand"],
+      referenceComparison,
+      referenceComparisonNotice,
       observableMetrics: {
         verticalDisplacementNorm: Math.round(verticalRise * 1000) / 1000,
         baselineAngleDeg: Math.round(initialKneeAngle),
@@ -561,6 +747,9 @@ export function evaluateSitToStand(frames: ValidatedPoseFrame[]): ChecklistTaskE
     status: "try-again",
     outcomeLabel: "Movement not clearly detected",
     feedbackSummary: "Movement not clearly detected. Please ensure your whole body is visible and perform a smooth rise to full standing before sitting down.",
+    referenceRange: TASK_REFERENCE_RANGES["sit-to-stand"],
+    referenceComparison: "unable-to-compare",
+    referenceComparisonNotice: "Sit-to-stand transition not clearly detected. Perform a smooth rise to full standing to evaluate against reference range.",
     observableMetrics: {
       verticalDisplacementNorm: Math.round(verticalRise * 1000) / 1000,
       baselineAngleDeg: Math.round(initialKneeAngle),
@@ -595,6 +784,9 @@ export function evaluateSupportedWeightShift(frames: ValidatedPoseFrame[]): Chec
       status: "unable-to-evaluate",
       outcomeLabel: "Unable to evaluate",
       feedbackSummary: "This movement cannot currently be evaluated reliably by this system. Torso and lower-limb landmarks were not clearly detected.",
+      referenceRange: TASK_REFERENCE_RANGES["supported-weight-shift"],
+      referenceComparison: "unable-to-compare",
+      referenceComparisonNotice: "Unable to evaluate reliably: pelvic and torso landmarks were not continuously visible.",
       trackingQuality,
       limitations,
       disclaimer: NON_DIAGNOSTIC_DISCLAIMER,
@@ -627,6 +819,9 @@ export function evaluateSupportedWeightShift(frames: ValidatedPoseFrame[]): Chec
       status: "unable-to-evaluate",
       outcomeLabel: "Unable to evaluate",
       feedbackSummary: "This movement cannot currently be evaluated reliably by this system. Pelvic landmarks were not continuously visible.",
+      referenceRange: TASK_REFERENCE_RANGES["supported-weight-shift"],
+      referenceComparison: "unable-to-compare",
+      referenceComparisonNotice: "Unable to evaluate reliably: pelvic landmarks were not continuously visible.",
       trackingQuality,
       limitations,
       disclaimer: NON_DIAGNOSTIC_DISCLAIMER,
@@ -640,11 +835,23 @@ export function evaluateSupportedWeightShift(frames: ValidatedPoseFrame[]): Chec
 
   // Noticeable lateral shift threshold: >= 0.03 normalized frame width
   if (lateralShift >= 0.03) {
+    const isWithin = lateralShift >= 0.035;
+    const referenceComparison: ReferenceComparisonStatus = isWithin
+      ? "within-reference"
+      : "outside-reference";
+
+    const referenceComparisonNotice = isWithin
+      ? "Movement observed within the selected reference range (coronal shift ≥ 3.5% frame width). Note: Camera observes 2D positioning only, not joint load or force distribution."
+      : `Observed lateral shift (${(lateralShift * 100).toFixed(1)}%) was outside the documented reference range (≥ 3.5%). This may reflect limited mobility or measurement variability.`;
+
     return {
       taskId: "supported-weight-shift",
       status: "completed",
       outcomeLabel: "Movement detected",
       feedbackSummary: `Movement detected — lateral body shift of approx. ${(lateralShift * 100).toFixed(1)}% of frame observed. Note: Monocular cameras observe body positioning only, not physical weight or ground reaction forces.`,
+      referenceRange: TASK_REFERENCE_RANGES["supported-weight-shift"],
+      referenceComparison,
+      referenceComparisonNotice,
       observableMetrics: {
         lateralDisplacementNorm: Math.round(lateralShift * 1000) / 1000,
         activeSide: "bilateral",
@@ -661,6 +868,9 @@ export function evaluateSupportedWeightShift(frames: ValidatedPoseFrame[]): Chec
     status: "try-again",
     outcomeLabel: "Movement not clearly detected",
     feedbackSummary: "Movement not clearly detected. Gently shift your pelvis and torso from left to right while keeping both feet planted, and try again.",
+    referenceRange: TASK_REFERENCE_RANGES["supported-weight-shift"],
+    referenceComparison: "unable-to-compare",
+    referenceComparisonNotice: "Lateral weight shift not clearly detected. Shift torso and hips gently from side to side to evaluate against reference range.",
     observableMetrics: {
       lateralDisplacementNorm: Math.round(lateralShift * 1000) / 1000,
       activeSide: "bilateral",
@@ -679,19 +889,41 @@ export function evaluateChecklistTask(
   taskId: ChecklistTaskId,
   frames: ValidatedPoseFrame[]
 ): ChecklistTaskEvaluation {
-  switch (taskId) {
-    case "seated-knee-extension":
-      return evaluateSeatedKneeExtension(frames);
-    case "seated-knee-flexion":
-      return evaluateSeatedKneeFlexion(frames);
-    case "sit-to-stand":
-      return evaluateSitToStand(frames);
-    case "supported-weight-shift":
-      return evaluateSupportedWeightShift(frames);
-    default: {
-      const _exhaustive: never = taskId;
-      throw new Error(`Unknown checklist task: ${_exhaustive}`);
+  try {
+    switch (taskId) {
+      case "seated-knee-extension":
+        return evaluateSeatedKneeExtension(frames);
+      case "seated-knee-flexion":
+        return evaluateSeatedKneeFlexion(frames);
+      case "sit-to-stand":
+        return evaluateSitToStand(frames);
+      case "supported-weight-shift":
+        return evaluateSupportedWeightShift(frames);
+      default: {
+        const _exhaustive: never = taskId;
+        throw new Error(`Unknown checklist task: ${_exhaustive}`);
+      }
     }
+  } catch (err) {
+    return {
+      taskId,
+      status: "unable-to-evaluate",
+      outcomeLabel: "Unable to evaluate",
+      feedbackSummary: "An unexpected error occurred while evaluating the recorded frames.",
+      referenceRange: TASK_REFERENCE_RANGES[taskId],
+      referenceComparison: "unable-to-compare",
+      referenceComparisonNotice: "Unable to evaluate movement due to a processing error.",
+      trackingQuality: {
+        totalFrames: Array.isArray(frames) ? frames.length : 0,
+        usableFrames: 0,
+        meanConfidence: 0,
+        qualityStatus: "unusable",
+        warning: err instanceof Error ? err.message : "Processing error",
+      },
+      limitations: ["Processing error occurred during frame evaluation."],
+      disclaimer: NON_DIAGNOSTIC_DISCLAIMER,
+      evaluatedAt: Date.now(),
+    };
   }
 }
 
@@ -712,6 +944,9 @@ export function generateChecklistSummary(
   let tryAgainCount = 0;
   let unableCount = 0;
   let notStartedCount = 0;
+  let withinReferenceCount = 0;
+  let outsideReferenceCount = 0;
+  let unableToCompareCount = 0;
   const warnings: string[] = [];
 
   for (const tid of taskIds) {
@@ -720,10 +955,19 @@ export function generateChecklistSummary(
       notStartedCount++;
     } else if (ev.status === "completed") {
       completedCount++;
+      if (ev.referenceComparison === "within-reference") {
+        withinReferenceCount++;
+      } else if (ev.referenceComparison === "outside-reference") {
+        outsideReferenceCount++;
+      } else {
+        unableToCompareCount++;
+      }
     } else if (ev.status === "try-again") {
       tryAgainCount++;
+      unableToCompareCount++;
     } else if (ev.status === "unable-to-evaluate") {
       unableCount++;
+      unableToCompareCount++;
       if (ev.trackingQuality.warning && !warnings.includes(ev.trackingQuality.warning)) {
         warnings.push(ev.trackingQuality.warning);
       }
@@ -739,6 +983,9 @@ export function generateChecklistSummary(
     unableCount,
     notStartedCount,
     allAttempted,
+    withinReferenceCount,
+    outsideReferenceCount,
+    unableToCompareCount,
     warnings,
   };
 }

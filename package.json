@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "test": "node --experimental-strip-types --test test/screeningRules.test.ts test/movementFeatures.test.ts test/xrayAnalysis.test.ts test/movementChecklist.test.ts test/movementSessionStorage.test.ts test/poseOptimization.test.ts",
+    "test": "node --experimental-strip-types --test test/screeningRules.test.ts test/movementFeatures.test.ts test/xrayAnalysis.test.ts test/movementChecklist.test.ts test/movementSessionStorage.test.ts test/poseOptimization.test.ts test/movementAngleAndCautiousScreening.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

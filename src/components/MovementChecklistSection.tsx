@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import {
   CHECKLIST_TASK_DEFINITIONS,
+  generateSymptomConditionedInterpretation,
   type ChecklistOverallSummary,
   type ChecklistTaskDefinition,
   type ChecklistTaskEvaluation,
@@ -45,6 +46,7 @@ export interface MovementChecklistSectionProps {
   isDemo?: boolean;
   gaitAssessment?: StructuredGaitAnalysisOutput | null;
   manualObservations?: ManualGaitObservations | null;
+  symptomsReported?: boolean;
 }
 
 const TASK_ORDER: ChecklistTaskId[] = [
@@ -74,6 +76,7 @@ export const MovementChecklistSection = memo(function MovementChecklistSection({
   isDemo,
   gaitAssessment,
   manualObservations,
+  symptomsReported,
 }: MovementChecklistSectionProps) {
   // Allow user to expand/collapse individual task details
   const [expandedTaskId, setExpandedTaskId] = useState<ChecklistTaskId | null>(
@@ -446,6 +449,111 @@ export const MovementChecklistSection = memo(function MovementChecklistSection({
                         </div>
                       )}
 
+                      {/* Documented Reference Range & Comparison */}
+                      {evaluation.referenceRange && (
+                        <div
+                          className="feedback-reference-block"
+                          style={{
+                            margin: "10px 0",
+                            padding: "10px 12px",
+                            background:
+                              evaluation.referenceComparison === "within-reference"
+                                ? "#f0fdf4"
+                                : evaluation.referenceComparison === "outside-reference"
+                                  ? "#fffbeb"
+                                  : "#f8fafc",
+                            border: `1px solid ${
+                              evaluation.referenceComparison === "within-reference"
+                                ? "#bbf7d0"
+                                : evaluation.referenceComparison === "outside-reference"
+                                  ? "#fde68a"
+                                  : "#e2e8f0"
+                            }`,
+                            borderRadius: "8px",
+                            fontSize: "11px",
+                            lineHeight: "1.45",
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                            <strong
+                              style={{
+                                color:
+                                  evaluation.referenceComparison === "within-reference"
+                                    ? "#166534"
+                                    : evaluation.referenceComparison === "outside-reference"
+                                      ? "#92400e"
+                                      : "#475569",
+                              }}
+                            >
+                              {evaluation.referenceComparison === "within-reference"
+                                ? "Movement observed within the selected reference range."
+                                : evaluation.referenceComparison === "outside-reference"
+                                  ? "Observed movement was outside the documented reference range."
+                                  : "Unable to evaluate reliably against reference range."}
+                            </strong>
+                            <span
+                              style={{
+                                fontSize: "10px",
+                                padding: "2px 7px",
+                                borderRadius: "4px",
+                                fontWeight: 700,
+                                background:
+                                  evaluation.referenceComparison === "within-reference"
+                                    ? "#dcfce7"
+                                    : evaluation.referenceComparison === "outside-reference"
+                                      ? "#fef3c7"
+                                      : "#f1f5f9",
+                                color:
+                                  evaluation.referenceComparison === "within-reference"
+                                    ? "#15803d"
+                                    : evaluation.referenceComparison === "outside-reference"
+                                      ? "#b45309"
+                                      : "#64748b",
+                              }}
+                            >
+                              {evaluation.referenceComparison === "within-reference"
+                                ? "Within Reference"
+                                : evaluation.referenceComparison === "outside-reference"
+                                  ? "Outside Reference"
+                                  : "Unverified"}
+                            </span>
+                          </div>
+
+                          <div style={{ color: "#334155", marginBottom: "3px" }}>
+                            <strong>Documented Reference Range:</strong> {evaluation.referenceRange.rangeLabel}
+                          </div>
+                          <div style={{ color: "#64748b", fontSize: "10.5px", marginBottom: "4px" }}>
+                            <strong>Clinical Source:</strong> {evaluation.referenceRange.sourceCitation} ({evaluation.referenceRange.source})
+                          </div>
+                          <div style={{ color: "#475569", fontSize: "10.5px", fontStyle: "italic", marginTop: "4px" }}>
+                            * {evaluation.referenceRange.methodologyNote}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Symptom-Conditioned Movement Interpretation */}
+                      <div
+                        className="feedback-symptom-interpretation"
+                        style={{
+                          margin: "10px 0",
+                          padding: "10px 12px",
+                          background: "#f0fdfa",
+                          border: "1px solid #ccfbf1",
+                          borderRadius: "8px",
+                          fontSize: "11px",
+                          color: "#0f766e",
+                          lineHeight: "1.5",
+                        }}
+                      >
+                        <div style={{ fontWeight: 700, marginBottom: "4px", display: "flex", alignItems: "center", gap: "6px" }}>
+                          <Info size={14} />
+                          <span>Movement Interpretation (Non-Diagnostic):</span>
+                        </div>
+                        <p style={{ margin: 0 }}>
+                          {generateSymptomConditionedInterpretation(evaluation, symptomsReported ?? false)}
+                        </p>
+                      </div>
+
                       {/* Real Model Tracking Quality */}
                       <div className="feedback-tracking-row">
                         <div className="tracking-score-info">
@@ -542,6 +650,24 @@ export const MovementChecklistSection = memo(function MovementChecklistSection({
             <span className="stat-label">Not Started</span>
           </div>
         </div>
+
+        {/* Reference Comparison Breakdown */}
+        {overallSummary.completedCount > 0 && (
+          <div style={{ display: "flex", gap: "14px", marginTop: "12px", padding: "8px 12px", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0", fontSize: "11px", flexWrap: "wrap", alignItems: "center" }}>
+            <strong style={{ color: "#334155" }}>Reference Comparison:</strong>
+            <span style={{ color: "#166534", fontWeight: 700 }}>
+              Within reference: {overallSummary.withinReferenceCount}
+            </span>
+            <span style={{ color: overallSummary.outsideReferenceCount > 0 ? "#92400e" : "#64748b", fontWeight: 700 }}>
+              Outside reference: {overallSummary.outsideReferenceCount}
+            </span>
+            {overallSummary.unableToCompareCount > 0 && (
+              <span style={{ color: "#64748b" }}>
+                Unverified / Incomplete: {overallSummary.unableToCompareCount}
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Aggregated Warnings */}
         {overallSummary.warnings.length > 0 && (

@@ -51,6 +51,9 @@ const MOCK_SUMMARY: ChecklistOverallSummary = {
   tryAgainCount: 1,
   unableCount: 0,
   notStartedCount: 1,
+  withinReferenceCount: 0,
+  outsideReferenceCount: 0,
+  unableToCompareCount: 0,
   allAttempted: false,
   warnings: [],
 };
